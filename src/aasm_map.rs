@@ -32,6 +32,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::EvidenceStatus;
 
+/// Pinned source read. Bump only when the dictionary is re-read from AASM.
+pub const AASM_PIN: &str = "0.56.1";
+
+/// This file is a dictionary, not a second kernel.
+pub const COPIES_KERNEL: bool = false;
+
 /// AASM evidence-plane class. Shop CLI may still print WAIT; this is what is stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -85,34 +91,58 @@ pub const VERIFY_INCONCLUSIVE_NOTE: &str = "AASM INCONCLUSIVE; command ran; not 
 pub const VERIFY_UNKNOWN_NOTE: &str = "AASM UNKNOWN; incomplete evidence is not PASS";
 pub const MERGE_ACK_NOTE: &str =
     "AASM EffectStatus.SUCCEEDED analog; command success is not achieved state";
+pub const INFORMATION_NOT_AUTHORITY: &str =
+    "handoff/mailbox/github check is Evidence; cannot CLOSE or mark VERIFIED";
+
+const GAP_MARKERS: &[&str] = &[
+    "missing",
+    "no verify",
+    "mailbox",
+    "token",
+    "not connected",
+    "assigned",
+    "gap",
+    "handoff",
+    "obligation",
+    "check run",
+    "checks pass",
+];
+
+const INCONCLUSIVE_MARKERS: &[&str] = &["fail", "exit", "conflict"];
+
+fn has_marker(hay: &str, markers: &[&str]) -> bool {
+    markers.iter().any(|m| hay.contains(m))
+}
 
 pub fn classify_wait_reason(reason: &str) -> EvidenceClass {
     let r = reason.to_ascii_lowercase();
-    if r.contains("missing")
-        || r.contains("no verify")
-        || r.contains("mailbox")
-        || r.contains("token")
-        || r.contains("not connected")
-        || r.contains("assigned")
-        || r.contains("gap")
-    {
+    if has_marker(&r, GAP_MARKERS) {
         EvidenceClass::InformationGap
-    } else if r.contains("fail") || r.contains("exit") || r.contains("conflict") {
+    } else if has_marker(&r, INCONCLUSIVE_MARKERS) {
         EvidenceClass::Inconclusive
     } else {
         EvidenceClass::Unknown
     }
 }
 
+/// Fail-closed: WAIT / gap text / non-zero or missing exit cannot become PASS.
+/// Command success is not achieved state.
 pub fn classify_verify(
     status: EvidenceStatus,
     exit_code: Option<i32>,
     last_lines: &str,
 ) -> EvidenceClass {
+    let from_lines = classify_wait_reason(last_lines);
+    if from_lines != EvidenceClass::Unknown {
+        return from_lines;
+    }
     if status == EvidenceStatus::Pass && exit_code == Some(0) {
         return EvidenceClass::Pass;
     }
-    classify_wait_reason(last_lines)
+    if matches!(exit_code, Some(code) if code != 0) {
+        return EvidenceClass::Inconclusive;
+    }
+    from_lines
 }
 
 pub fn note_for(class: EvidenceClass) -> &'static str {
@@ -124,15 +154,47 @@ pub fn note_for(class: EvidenceClass) -> &'static str {
     }
 }
 
-/// Parent-subset: child path must equal or sit under a claimed parent path.
-/// A wider child path is scope amplification and is refused.
-pub fn path_within_parent_scope(child: &str, parent_scope: &str) -> bool {
-    let c = crate::paths::normalize_path(child);
-    let p = crate::paths::normalize_path(parent_scope);
-    if c.is_empty() || p.is_empty() {
-        return false;
+/// Collapse `.` / `..` for lease-subset math only. Escape above the claim root
+/// or an empty result is refused. This is not an AASM path type.
+fn collapse_lease_path(raw: &str) -> Option<Vec<String>> {
+    let n = crate::paths::normalize_path(raw);
+    if n.is_empty() {
+        return None;
     }
-    c == p || c.starts_with(&(p + "/"))
+    let mut out = Vec::new();
+    for part in n.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            if out.pop().is_none() {
+                return None;
+            }
+            continue;
+        }
+        if part.contains(':') {
+            return None;
+        }
+        out.push(part.to_string());
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// Parent-subset: child path must equal or sit under a claimed parent path.
+/// A wider child path, a `..` walk out of the claim, or an empty path is
+/// scope amplification and is refused.
+pub fn path_within_parent_scope(child: &str, parent_scope: &str) -> bool {
+    let Some(c) = collapse_lease_path(child) else {
+        return false;
+    };
+    let Some(p) = collapse_lease_path(parent_scope) else {
+        return false;
+    };
+    c.starts_with(p.as_slice())
 }
 
 pub fn paths_within_parent_scope(
@@ -155,6 +217,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn map_is_not_a_kernel_copy() {
+        assert!(!COPIES_KERNEL);
+        assert_eq!(AASM_PIN, "0.56.1");
+    }
+
+    #[test]
     fn wait_classes_are_not_pass() {
         assert!(EvidenceClass::Inconclusive.is_shop_wait());
         assert!(EvidenceClass::InformationGap.is_shop_wait());
@@ -168,14 +236,61 @@ mod tests {
             classify_verify(EvidenceStatus::Wait, Some(1), "exit 1"),
             EvidenceClass::Pass
         );
+        assert_eq!(
+            classify_verify(
+                EvidenceStatus::Pass,
+                Some(0),
+                "no verify command recorded"
+            ),
+            EvidenceClass::InformationGap
+        );
+        assert_eq!(
+            classify_verify(
+                EvidenceStatus::Pass,
+                Some(0),
+                "mandatory child still ASSIGNED (obligation open)"
+            ),
+            EvidenceClass::InformationGap
+        );
+        assert_eq!(
+            classify_verify(EvidenceStatus::Pass, Some(0), "mailbox reply / checks pass"),
+            EvidenceClass::InformationGap
+        );
+        assert_eq!(
+            classify_verify(EvidenceStatus::Wait, Some(0), ""),
+            EvidenceClass::Unknown
+        );
+        assert_eq!(
+            classify_verify(EvidenceStatus::Pass, Some(0), ""),
+            EvidenceClass::Pass
+        );
+        assert_eq!(
+            classify_verify(EvidenceStatus::Pass, None, ""),
+            EvidenceClass::Unknown
+        );
+        assert_eq!(
+            classify_verify(EvidenceStatus::Pass, Some(1), "ok"),
+            EvidenceClass::Inconclusive
+        );
+        assert_eq!(
+            EvidenceClass::InformationGap.to_shop_status(),
+            EvidenceStatus::Wait
+        );
+        assert_eq!(EvidenceClass::Pass.to_shop_status(), EvidenceStatus::Pass);
     }
 
     #[test]
     fn parent_subset_refuses_amplification() {
         assert!(path_within_parent_scope("src/a", "src"));
         assert!(path_within_parent_scope("src/a", "src/a"));
+        assert!(path_within_parent_scope("src/a/./x", "src/a"));
         assert!(!path_within_parent_scope("src", "src/a"));
         assert!(!path_within_parent_scope("other", "src"));
+        assert!(!path_within_parent_scope("src/foo", "src/foobar"));
+        assert!(!path_within_parent_scope("src/a/../../secret", "src/a"));
+        assert!(!path_within_parent_scope("src/a/../b", "src/a"));
+        assert!(!path_within_parent_scope("../src/a", "src/a"));
+        assert!(!path_within_parent_scope("C:/src/a", "src/a"));
         assert_eq!(
             paths_within_parent_scope(&["src/c".into()], &["src/a".into(), "src/b".into()]),
             Some("src/c".into())
@@ -183,6 +298,10 @@ mod tests {
         assert_eq!(
             paths_within_parent_scope(&["src/a/x".into()], &["src/a".into()]),
             None
+        );
+        assert_eq!(
+            paths_within_parent_scope(&["src/a/../c".into()], &["src/a".into()]),
+            Some("src/a/../c".into())
         );
     }
 }
