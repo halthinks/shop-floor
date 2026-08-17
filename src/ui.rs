@@ -174,7 +174,26 @@ fn route(app: &Mutex<Shop>, method: &str, path: &str, body: &str) -> (String, St
         }
         ("GET", "/api/steer") => {
             let shop = app.lock().unwrap_or_else(|e| e.into_inner());
-            json_ok(json!({"lines": shop.steer_transcript()}))
+            let _ = shop.ingest_replies();
+            let mail = shop.observe_mailbox();
+            let status = if mail.present && mail.wait.is_none() {
+                "Live"
+            } else {
+                "Waiting"
+            };
+            json_ok(json!({
+                "lines": shop.steer_transcript(),
+                "peer": crate::mailbox::STEER_TO,
+                "status": status,
+            }))
+        }
+        ("GET", "/api/memory") => {
+            let shop = app.lock().unwrap_or_else(|e| e.into_inner());
+            json_ok(serde_json::to_value(shop.memory()).unwrap_or(json!({})))
+        }
+        ("GET", "/api/floor") => {
+            let shop = app.lock().unwrap_or_else(|e| e.into_inner());
+            json_ok(serde_json::to_value(shop.floor()).unwrap_or(json!({})))
         }
         ("GET", "/api/events") => {
             let shop = app.lock().unwrap_or_else(|e| e.into_inner());
@@ -240,6 +259,13 @@ fn route(app: &Mutex<Shop>, method: &str, path: &str, body: &str) -> (String, St
                 Err(e) => json_err(&e),
             }
         }
+        ("POST", "/api/memory") => {
+            let mut shop = app.lock().unwrap_or_else(|e| e.into_inner());
+            match memory_action(&mut shop, body) {
+                Ok(v) => json_ok(v),
+                Err(e) => json_err(&e),
+            }
+        }
         ("POST", "/api/project/open") => {
             let mut shop = app.lock().unwrap_or_else(|e| e.into_inner());
             match open_project(&mut shop, body) {
@@ -294,10 +320,14 @@ fn list_or_wait(v: Result<Value>) -> Value {
 fn github_module(shop: &Shop, pull: Option<String>) -> Value {
     let repo = shop.github_repo().ok().flatten();
     let authed = shop.github_skills().authenticated();
+    let public_repo = repo
+        .as_ref()
+        .map(|r| crate::skills::is_recorded_public(&r.slug()))
+        .unwrap_or(false);
     let wait = if repo.is_none() {
         Some("WAIT: GitHub repo not connected")
-    } else if !authed {
-        Some("WAIT: GitHub token missing; never fake")
+    } else if !authed && !public_repo {
+        Some("WAIT: private repo needs gh or token")
     } else {
         None
     };
@@ -308,7 +338,7 @@ fn github_module(shop: &Shop, pull: Option<String>) -> Value {
     let mut comments = json!("WAIT");
     let mut selected = pull.clone();
     if let Some(r) = &repo {
-        if authed {
+        if authed || public_repo {
             issues = list_or_wait(
                 shop.github_skills()
                     .invoke("issues.list", json!({"owner": r.owner, "repo": r.name})),
@@ -391,8 +421,9 @@ fn github_search(shop: &Shop, q: String, kind: String) -> Value {
     let Some(r) = shop.github_repo().ok().flatten() else {
         return json!({"WAIT": "GitHub repo not connected"});
     };
-    if !shop.github_skills().authenticated() {
-        return json!({"WAIT": "GitHub token missing; never fake"});
+    let public_repo = crate::skills::is_recorded_public(&r.slug());
+    if !shop.github_skills().authenticated() && !public_repo {
+        return json!({"WAIT": "private repo needs gh or token"});
     }
     if q.trim().is_empty() {
         return json!({"WAIT": "empty search"});
@@ -414,8 +445,9 @@ fn github_file(shop: &Shop, path: String) -> Value {
     let Some(r) = shop.github_repo().ok().flatten() else {
         return json!({"WAIT": "GitHub repo not connected"});
     };
-    if !shop.github_skills().authenticated() {
-        return json!({"WAIT": "GitHub token missing; never fake"});
+    let public_repo = crate::skills::is_recorded_public(&r.slug());
+    if !shop.github_skills().authenticated() && !public_repo {
+        return json!({"WAIT": "private repo needs gh or token"});
     }
     list_or_wait(shop.github_skills().invoke(
         "files.get",
@@ -482,6 +514,28 @@ fn merge(shop: &mut Shop, body: &str) -> Result<Value> {
         .cloned()
         .ok_or_else(|| ShopError::IncompleteEvidence("parent required".into()))?;
     shop.merge_verified(&parent)
+}
+
+fn memory_action(shop: &mut Shop, body: &str) -> Result<Value> {
+    let f = form(body);
+    let action = f.get("action").map(String::as_str).unwrap_or("");
+    let fact = f.get("fact").cloned().unwrap_or_default();
+    match action {
+        "remember" => {
+            let tier = crate::memory::MemoryTier::parse(
+                f.get("tier").map(String::as_str).unwrap_or("profile"),
+            )?;
+            let mem = shop.remember(tier, &fact)?;
+            Ok(serde_json::to_value(mem)?)
+        }
+        "forget" => {
+            let mem = shop.forget(&fact)?;
+            Ok(serde_json::to_value(mem)?)
+        }
+        _ => Err(ShopError::IncompleteEvidence(
+            "action must be remember or forget".into(),
+        )),
+    }
 }
 
 fn open_project(shop: &mut Shop, body: &str) -> Result<Value> {

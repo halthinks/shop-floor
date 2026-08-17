@@ -31,7 +31,10 @@ impl LiveGitHub {
             return gh_api(method, path, body, self.token.as_deref());
         }
         if let Some(token) = &self.token {
-            return curl_api(method, path, body, token);
+            return curl_api(method, path, body, Some(token));
+        }
+        if method.eq_ignore_ascii_case("GET") && body.is_none() {
+            return curl_api(method, path, None, None);
         }
         Err(ShopError::Wait(
             "no GitHub auth (gh missing and no GITHUB_TOKEN/GH_TOKEN/.shop/github.token)".into(),
@@ -57,9 +60,17 @@ impl GitHubSkills for LiveGitHub {
             return Err(ShopError::UnknownSkill(skill.to_string()));
         }
         if !self.authenticated() {
-            return Err(ShopError::Wait(format!(
-                "no GitHub auth for {skill}; never fake a result"
-            )));
+            if crate::skills::skill_requires_auth(skill) {
+                return Err(ShopError::Wait(format!(
+                    "no GitHub auth for {skill}; never fake a result"
+                )));
+            }
+            if let Some(slug) = crate::skills::repo_slug_from_args(&args) {
+                if !crate::skills::is_recorded_public(&slug) {
+                    return Err(crate::skills::private_needs_auth());
+                }
+            }
+            return dispatch_live(self, skill, &args);
         }
         dispatch_live(self, skill, &args)
     }
@@ -477,9 +488,9 @@ fn gh_api(method: &str, path: &str, body: Option<&Value>, token: Option<&str>) -
     parse_cmd_json("gh", &out)
 }
 
-fn curl_api(method: &str, path: &str, body: Option<&Value>, token: &str) -> Result<Value> {
+fn curl_api(method: &str, path: &str, body: Option<&Value>, token: Option<&str>) -> Result<Value> {
     let url = format!("https://api.github.com/{path}");
-    let tmp = header_file(token)?;
+    let tmp = token.map(header_file).transpose()?;
     let mut cmd = Command::new("curl");
     cmd.arg("-sS")
         .arg("-X")
@@ -490,15 +501,18 @@ fn curl_api(method: &str, path: &str, body: Option<&Value>, token: &str) -> Resu
         .arg("X-GitHub-Api-Version: 2022-11-28")
         .arg("-H")
         .arg("User-Agent: shop-floor")
-        .arg("-H")
-        .arg(format!("@{}", tmp.display()))
         .arg(&url);
+    if let Some(path) = &tmp {
+        cmd.arg("-H").arg(format!("@{}", path.display()));
+    }
     if let Some(b) = body {
         cmd.arg("-H").arg("Content-Type: application/json");
         cmd.arg("-d").arg(b.to_string());
     }
     let out = cmd.output()?;
-    let _ = std::fs::remove_file(&tmp);
+    if let Some(path) = &tmp {
+        let _ = std::fs::remove_file(path);
+    }
     parse_cmd_json("curl", &out)
 }
 

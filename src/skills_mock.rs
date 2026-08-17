@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use serde_json::{json, Value};
 
 use crate::error::{Result, ShopError};
-use crate::skills::{local_secret_scan, GitHubSkills, SKILL_PACK};
+use crate::skills::{invoke_public_or_wait, local_secret_scan, GitHubSkills, SKILL_PACK};
 
 #[derive(Default)]
 struct MockInner {
@@ -83,9 +83,7 @@ impl GitHubSkills for MockGitHub {
             ));
         }
         if !self.authed {
-            return Err(ShopError::Wait(format!(
-                "no GitHub auth for {skill}; never fake a result"
-            )));
+            return invoke_public_or_wait(skill, &args, false);
         }
         self.record(skill);
         match skill {

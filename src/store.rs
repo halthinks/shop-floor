@@ -12,8 +12,10 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::error::{Result, ShopError};
+use crate::floor::{self, FloorMemory};
 use crate::github::GitHubRepo;
 use crate::hash::{format_rfc3339, unix_now};
+use crate::memory;
 use crate::types::ShopState;
 use crate::workers::WorkerRoster;
 
@@ -52,7 +54,9 @@ impl Store {
         if !root.join("workers.json").exists() {
             write_json_atomic(&root.join("workers.json"), &WorkerRoster::default())?;
         }
-        Ok(Self { root })
+        let store = Self { root };
+        store.ensure_memory_and_floor()?;
+        Ok(store)
     }
 
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
@@ -67,7 +71,62 @@ impl Store {
         if !root.join("workers.json").exists() {
             write_json_atomic(&root.join("workers.json"), &WorkerRoster::default())?;
         }
-        Ok(Self { root })
+        let store = Self { root };
+        store.ensure_memory_and_floor()?;
+        store.hydrate_snapshot_from_floor()?;
+        Ok(store)
+    }
+
+    fn ensure_memory_and_floor(&self) -> Result<()> {
+        memory::memory_dir(&self.root)?;
+        floor::ensure_floor_files(&self.root)?;
+        Ok(())
+    }
+
+    fn hydrate_snapshot_from_floor(&self) -> Result<()> {
+        let state = self.load_snapshot_only()?;
+        if !state.parents.is_empty() {
+            floor::write_floor(&self.root, &FloorMemory::from_state(&state))?;
+            return Ok(());
+        }
+        let floor = floor::load_floor(&self.root);
+        if let Some(hydrated) = floor::state_from_floor(&floor) {
+            self.save_snapshot_only(&hydrated)?;
+        }
+        Ok(())
+    }
+
+    fn load_snapshot_only(&self) -> Result<ShopState> {
+        let snap = self.root.join("snapshot.json");
+        if snap.exists() {
+            let data = fs::read(&snap)?;
+            return Ok(serde_json::from_slice(&data)?);
+        }
+        Ok(ShopState::default())
+    }
+
+    fn save_snapshot_only(&self, state: &ShopState) -> Result<()> {
+        write_json_atomic(&self.root.join("snapshot.json"), state)?;
+        write_json_atomic(&self.root.join("claims.json"), &state.claims)?;
+        let parents_dir = self.root.join("parents");
+        fs::create_dir_all(&parents_dir)?;
+        let mut keep = std::collections::BTreeSet::new();
+        for (id, parent) in &state.parents {
+            let path = parents_dir.join(format!("{id}.json"));
+            write_json_atomic(&path, parent)?;
+            keep.insert(path);
+        }
+        if parents_dir.is_dir() {
+            for entry in fs::read_dir(&parents_dir)? {
+                let path = entry?.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("json")
+                    && !keep.contains(&path)
+                {
+                    let _ = fs::remove_file(path);
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn load_workers(&self) -> Result<WorkerRoster> {
@@ -141,24 +200,29 @@ impl Store {
     }
 
     pub fn save(&self, state: &ShopState) -> Result<()> {
-        write_json_atomic(&self.root.join("snapshot.json"), state)?;
-        write_json_atomic(&self.root.join("claims.json"), &state.claims)?;
+        self.save_snapshot_only(state)?;
+        floor::write_floor(&self.root, &FloorMemory::from_state(state))?;
+        Ok(())
+    }
 
-        let parents_dir = self.root.join("parents");
-        fs::create_dir_all(&parents_dir)?;
-        let mut keep = std::collections::BTreeSet::new();
-        for (id, parent) in &state.parents {
-            let path = parents_dir.join(format!("{id}.json"));
-            write_json_atomic(&path, parent)?;
-            keep.insert(path);
-        }
-        for entry in fs::read_dir(&parents_dir)? {
-            let path = entry?.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("json") && !keep.contains(&path) {
-                let _ = fs::remove_file(path);
+    pub fn load_floor(&self) -> FloorMemory {
+        let mut floor = floor::load_floor(&self.root);
+        if floor.current.is_none() && floor.children.is_empty() {
+            if let Ok(state) = self.load() {
+                let mut from_state = FloorMemory::from_state(&state);
+                from_state.history = floor.history;
+                floor = from_state;
             }
         }
-        Ok(())
+        floor
+    }
+
+    pub fn append_floor_history(&self, parent: &crate::types::Parent) -> Result<()> {
+        floor::append_history(&self.root, &floor::history_from_parent(parent))
+    }
+
+    pub fn load_memory(&self) -> crate::memory::ShopMemory {
+        memory::load_memory(&self.root)
     }
 
     pub fn append_event(&self, event: &impl Serialize) -> Result<()> {

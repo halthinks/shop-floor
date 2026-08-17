@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use crate::error::Result;
 use crate::hash::{format_rfc3339, unix_now};
 use crate::mailbox::{write_steer, SteerRecord};
+use crate::memory::MemoryTier;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SteerVerb {
@@ -53,6 +54,10 @@ pub enum SteerVerb {
     OpenRepo {
         spec: String,
     },
+    Remember {
+        tier: MemoryTier,
+        fact: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +90,36 @@ pub fn parse_steer(text: &str) -> Option<SteerVerb> {
         return None;
     }
     let lower = t.to_ascii_lowercase();
+    if let Some(rest) = strip_prefix_ci(t, "remember ") {
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return None;
+        }
+        if let Some(fact) = strip_prefix_ci(rest, "log ") {
+            let fact = fact.trim();
+            if fact.is_empty() {
+                return None;
+            }
+            return Some(SteerVerb::Remember {
+                tier: MemoryTier::Log,
+                fact: fact.to_string(),
+            });
+        }
+        if let Some(fact) = strip_prefix_ci(rest, "profile ") {
+            let fact = fact.trim();
+            if fact.is_empty() {
+                return None;
+            }
+            return Some(SteerVerb::Remember {
+                tier: MemoryTier::Profile,
+                fact: fact.to_string(),
+            });
+        }
+        return Some(SteerVerb::Remember {
+            tier: MemoryTier::Profile,
+            fact: rest.to_string(),
+        });
+    }
     if lower == "status" {
         return Some(SteerVerb::Status);
     }
@@ -219,8 +254,9 @@ pub fn steer_to_supergrok(
     outbox: &std::path::Path,
     mailbox: Option<&std::path::Path>,
     body: &str,
+    memory: serde_json::Value,
 ) -> Result<(SteerRecord, Vec<std::path::PathBuf>, Option<String>)> {
-    let rec = SteerRecord::new(body);
+    let rec = SteerRecord::with_memory(body, memory);
     let written = write_steer(outbox, mailbox, &rec)?;
     let wait = if mailbox.map(|p| p.is_dir()).unwrap_or(false) {
         None

@@ -129,10 +129,16 @@ pub struct SteerRecord {
     pub to: String,
     pub body: String,
     pub created_at: String,
+    #[serde(default)]
+    pub memory: serde_json::Value,
 }
 
 impl SteerRecord {
     pub fn new(body: &str) -> Self {
+        Self::with_memory(body, serde_json::json!({}))
+    }
+
+    pub fn with_memory(body: &str, memory: serde_json::Value) -> Self {
         Self {
             schema_version: SCHEMA_VERSION.to_string(),
             type_: STEER_TYPE.to_string(),
@@ -140,6 +146,7 @@ impl SteerRecord {
             to: STEER_TO.to_string(),
             body: body.to_string(),
             created_at: format_rfc3339(unix_now()),
+            memory,
         }
     }
 }

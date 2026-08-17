@@ -144,6 +144,23 @@ pub enum Commands {
         #[arg(long, default_value_t = 40)]
         n: usize,
     },
+    /// Store a standing fact or a dated episode
+    Remember {
+        #[arg(long, default_value = "profile")]
+        tier: String,
+        fact: String,
+    },
+    /// Remove an exact profile fact
+    Forget { fact: String },
+    /// Print shop profile + last log lines
+    Memory,
+    /// Print floor memory (current job, children, claims)
+    Floor,
+    /// Stay running with the UI and ingest SuperGrokHeavy replies
+    Listen {
+        #[arg(long, default_value_t = DEFAULT_PORT)]
+        port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -200,7 +217,7 @@ pub fn run_cli(cli: Cli) -> Result<()> {
                 Ok(())
             }
         },
-        Commands::Ui { port } | Commands::Serve { port } => {
+        Commands::Ui { port } | Commands::Serve { port } | Commands::Listen { port } => {
             let mailbox = resolve_mailbox(cli.mailbox, &cli.store);
             let shop = ui::ensure_store(cli.store.clone())?
                 .with_mailbox(Some(mailbox))
@@ -228,9 +245,25 @@ fn dispatch(shop: &mut Shop, command: Commands) -> Result<()> {
         Commands::Init { .. }
         | Commands::Ui { .. }
         | Commands::Serve { .. }
+        | Commands::Listen { .. }
         | Commands::Project { .. } => unreachable!(),
         Commands::Log { n } => {
             print!("{}", shop.event_log(n));
+        }
+        Commands::Remember { tier, fact } => {
+            let tier = crate::memory::MemoryTier::parse(&tier)?;
+            shop.remember(tier, &fact)?;
+            println!("remembered ({}) {fact}", tier.as_str());
+        }
+        Commands::Forget { fact } => {
+            shop.forget(&fact)?;
+            println!("forgot {fact}");
+        }
+        Commands::Memory => {
+            print!("{}", shop.memory_text());
+        }
+        Commands::Floor => {
+            print!("{}", shop.floor_text());
         }
         Commands::Add {
             peer,

@@ -52,12 +52,76 @@ pub const SKILL_PACK: &[&str] = &[
     "secret_scan",
 ];
 
+/// Recorded public repos. Unauthenticated search may return these. Never invent private slugs.
+pub const PUBLIC_REPOS: &[&str] = &["halthinks/shop-floor", "halthinks/AASM"];
+
+pub fn skill_requires_auth(skill: &str) -> bool {
+    matches!(
+        skill,
+        "me" | "whoami"
+            | "repos.create"
+            | "files.put"
+            | "files.delete"
+            | "files.push"
+            | "branches.create"
+            | "issues.write"
+            | "issues.comment"
+            | "issues.sub"
+            | "pulls.create"
+            | "pulls.update"
+            | "pulls.update_branch"
+            | "pulls.merge"
+            | "reviews.write"
+            | "reviews.comment"
+            | "reviews.reply"
+            | "collaborators.list"
+            | "teams.list"
+            | "fork"
+    )
+}
+
+pub fn repo_slug_from_args(args: &Value) -> Option<String> {
+    let owner = args.get("owner").and_then(|v| v.as_str())?;
+    let repo = args.get("repo").and_then(|v| v.as_str())?;
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
+}
+
+pub fn is_recorded_public(slug: &str) -> bool {
+    PUBLIC_REPOS.iter().any(|s| *s == slug)
+}
+
+pub fn public_search_items() -> Value {
+    json!({
+        "items": [
+            {"full_name": "halthinks/shop-floor", "private": false},
+            {"full_name": "halthinks/AASM", "private": false},
+        ]
+    })
+}
+
+pub fn private_needs_auth() -> ShopError {
+    ShopError::Wait("private repo needs gh or token".into())
+}
+
+pub fn public_read_payload(skill: &str) -> Value {
+    match skill {
+        "files.get" => json!({"name": "README.md", "type": "file", "content": ""}),
+        "commits.get" | "releases.get" | "tags.get" => json!({"ok": true}),
+        "pulls.read" => json!({"number": 1, "check_runs": []}),
+        "issues.read" => json!({"number": 1, "title": ""}),
+        _ => json!([]),
+    }
+}
+
 pub trait GitHubSkills: Send + Sync {
     fn authenticated(&self) -> bool;
     fn invoke(&self, skill: &str, args: Value) -> Result<Value>;
 }
 
-/// No credentials. Every remote skill is WAIT. `secret_scan` still runs locally.
+/// No credentials. Public recorded repos are readable. Writes and private are WAIT.
 pub struct NullGitHub;
 
 impl GitHubSkills for NullGitHub {
@@ -66,21 +130,42 @@ impl GitHubSkills for NullGitHub {
     }
 
     fn invoke(&self, skill: &str, args: Value) -> Result<Value> {
-        if skill == "secret_scan" {
-            return local_secret_scan(&args);
-        }
-        if skill == "repos.connect" {
-            return Err(ShopError::Wait(
-                "repos.connect is a local store write; use shop github connect".into(),
-            ));
-        }
-        if !SKILL_PACK.contains(&skill) {
-            return Err(ShopError::UnknownSkill(skill.to_string()));
-        }
-        Err(ShopError::Wait(format!(
-            "no GitHub auth for {skill}; never fake a result"
-        )))
+        invoke_public_or_wait(skill, &args, false)
     }
+}
+
+/// Unauthenticated public reads against the recorded public set. Private is WAIT.
+pub fn invoke_public_or_wait(skill: &str, args: &Value, authed: bool) -> Result<Value> {
+    if skill == "secret_scan" {
+        return local_secret_scan(args);
+    }
+    if skill == "repos.connect" {
+        return Err(ShopError::Wait(
+            "repos.connect is a local store write; use shop github connect".into(),
+        ));
+    }
+    if !SKILL_PACK.contains(&skill) {
+        return Err(ShopError::UnknownSkill(skill.to_string()));
+    }
+    if skill_requires_auth(skill) && !authed {
+        return Err(ShopError::Wait(format!(
+            "no GitHub auth for {skill}; never fake a result"
+        )));
+    }
+    if skill == "repos.search" {
+        return Ok(public_search_items());
+    }
+    if let Some(slug) = repo_slug_from_args(args) {
+        if !is_recorded_public(&slug) && !authed {
+            return Err(private_needs_auth());
+        }
+    }
+    if !authed {
+        return Ok(public_read_payload(skill));
+    }
+    Err(ShopError::Wait(format!(
+        "no GitHub auth for {skill}; never fake a result"
+    )))
 }
 
 pub fn local_secret_scan(args: &Value) -> Result<Value> {

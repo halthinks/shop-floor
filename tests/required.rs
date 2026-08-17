@@ -303,16 +303,22 @@ fn ui_serves_command_center_structure() {
     assert!(PAGE.contains("id=\"mailbox\""));
     assert!(PAGE.contains("id=\"add-worker\""));
     assert!(PAGE.contains("id=\"intelligence-backend\""));
-    assert!(PAGE.contains("WORKERS"));
-    assert!(PAGE.contains("FLOOR"));
-    assert!(PAGE.contains("GITHUB"));
-    assert!(PAGE.contains("CONTROL"));
-    assert!(PAGE.contains("FEED"));
-    assert!(PAGE.contains("MAILBOX"));
+    assert!(PAGE.contains("Workers"));
+    assert!(PAGE.contains("Current job"));
+    assert!(PAGE.contains("GitHub"));
+    assert!(PAGE.contains("Talk to the boss"));
     assert!(PAGE.contains("SuperGrokHeavy"));
+    assert!(PAGE.contains("orchestrator"));
+    assert!(PAGE.contains("planner"));
+    assert!(PAGE.contains("What shop remembers"));
+    assert!(PAGE.contains("The boss sees this every time you message him."));
+    assert!(PAGE.contains("id=\"composer\"") || PAGE.contains("composer"));
+    assert!(PAGE.contains("id=\"send\"") || PAGE.contains("Send"));
+    assert!(PAGE.contains("Message the boss"));
+    assert!(PAGE.contains("Activity"));
+    assert!(PAGE.contains("Inbox"));
+    assert!(PAGE.contains("This computer"));
     assert!(PAGE.contains("action-pill"));
-    assert!(PAGE.contains("LOCAL"));
-    assert!(PAGE.contains("GITHUB"));
     assert!(PAGE.contains("id=\"steer-input\""));
     assert!(PAGE.contains("id=\"project-switcher\""));
     assert!(PAGE.contains("Open folder") || PAGE.contains("open-folder"));
@@ -331,7 +337,10 @@ fn ui_serves_command_center_structure() {
     assert!(html.contains("id=\"control\""));
     assert!(html.contains("id=\"feed\""));
     assert!(html.contains("SuperGrokHeavy"));
-    assert!(html.contains("LOCAL"));
+    assert!(html.contains("Talk to the boss"));
+    assert!(html.contains("What shop remembers"));
+    assert!(html.contains("Current job"));
+    assert!(html.contains("This computer"));
     assert!(
         html.contains("intelligence-backend") || html.contains("name=\"backend\""),
         "command center must include an intelligence control"
@@ -605,6 +614,10 @@ fn steer_free_text_goes_to_supergrokheavy_not_grok_bot() {
     assert_eq!(rec["type"], "steer");
     assert_eq!(rec["to"], "cursor-groksuperheavy");
     assert_eq!(rec["from"], "user");
+    assert!(rec["memory"]["profile"].is_array());
+    assert!(rec["memory"]["floor"].is_object());
+    assert!(rec["memory"]["floor"].get("children").is_some());
+    assert!(rec["memory"]["floor"].get("claims").is_some());
 }
 
 #[test]
@@ -655,6 +668,164 @@ fn refuse_platform_project_path() {
         Err(ShopError::ForbiddenWrite(_)) => {}
         Err(e) => panic!("expected ForbiddenWrite, got {e}"),
     }
+}
+
+#[test]
+fn remember_and_forget_profile_facts() {
+    let (mut shop, dir) = fresh();
+    shop.remember(shop::MemoryTier::Profile, "we ship shop-floor")
+        .unwrap();
+    let mem = shop.memory();
+    assert!(mem.profile.iter().any(|f| f == "we ship shop-floor"));
+    assert!(dir.join("memory/profile.json").is_file());
+    shop.forget("we ship shop-floor").unwrap();
+    assert!(!shop
+        .memory()
+        .profile
+        .iter()
+        .any(|f| f == "we ship shop-floor"));
+    match shop.remember(shop::MemoryTier::Profile, r"C:\TextPCB Platform") {
+        Err(ShopError::ForbiddenWrite(_)) => {}
+        other => panic!("expected ForbiddenWrite, got {other:?}"),
+    }
+}
+
+#[test]
+fn add_worker_grows_memory_log() {
+    let (mut shop, _dir) = fresh();
+    let before = shop.memory().log.len();
+    shop.add_worker("alice", "Alice", "grok-bot", "", true)
+        .unwrap();
+    assert!(shop.memory().log.len() > before);
+    let joined = shop
+        .memory()
+        .log
+        .iter()
+        .map(|l| l.fact.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("alice"));
+}
+
+#[test]
+fn floor_memory_persists_across_open_store() {
+    let dir = tmp_store();
+    let mut shop = Shop::init(&dir).unwrap();
+    enroll(&mut shop, &["alice"]);
+    shop.open("P", "title", "body").unwrap();
+    shop.split("P", "c1", "alice", "src/a,src/b", "one", "do a")
+        .unwrap();
+    assert!(dir.join("floor/current.json").is_file());
+    assert!(dir.join("floor/children.json").is_file());
+    assert!(dir.join("floor/claims.json").is_file());
+    let floor = shop.floor();
+    assert_eq!(floor.current.as_ref().map(|c| c.id.as_str()), Some("P"));
+    assert_eq!(floor.children.len(), 1);
+    assert_eq!(floor.children[0].state, ChildState::Assigned);
+    assert_eq!(floor.claims.len(), 1);
+    drop(shop);
+
+    let shop2 = Shop::open_store(&dir).unwrap();
+    let floor2 = shop2.floor();
+    assert_eq!(floor2.current.as_ref().map(|c| c.id.as_str()), Some("P"));
+    assert_eq!(floor2.children.len(), 1);
+    assert_eq!(floor2.children[0].id, "c1");
+    assert_eq!(floor2.children[0].peer, "alice");
+    assert_eq!(floor2.claims.len(), 1);
+    assert_eq!(floor2.claims[0].paths, vec!["src/a", "src/b"]);
+}
+
+#[test]
+fn floor_memory_records_bounce_and_close_clears_current() {
+    let (mut shop, dir) = fresh();
+    enroll(&mut shop, &["alice", "bob"]);
+    shop.open("P", "title", "body").unwrap();
+    shop.split("P", "c1", "alice", "src/a", "one", "a").unwrap();
+    shop.split("P", "c2", "bob", "src/b", "two", "b").unwrap();
+    let bounced = shop.bounce("P", "c1", "failed closed").unwrap();
+    assert_eq!(bounced.state, ChildState::Bounced);
+    let floor = shop.floor();
+    let c1 = floor.children.iter().find(|c| c.id == "c1").unwrap();
+    assert_eq!(c1.state, ChildState::Bounced);
+    assert_eq!(c1.bounce_reason.as_deref(), Some("failed closed"));
+    assert_ne!(c1.state, ChildState::Joined);
+
+    shop.accept("P", "c1", r#"{"status":"PASS"}"#).unwrap_err();
+    shop.assign("P").unwrap();
+    shop.accept("P", "c1", r#"{"status":"PASS"}"#).unwrap();
+    shop.accept("P", "c2", r#"{"status":"DONE"}"#).unwrap();
+    shop.join("P").unwrap();
+    shop.reduce("P", "pkg").unwrap();
+    shop.verify("P", Some("true")).unwrap();
+    shop.close("P").unwrap();
+    let floor = shop.floor();
+    assert!(floor.current.is_none());
+    assert!(dir.join("floor/history.jsonl").is_file());
+    let hist = fs::read_to_string(dir.join("floor/history.jsonl")).unwrap();
+    assert!(hist.contains("\"P\"") || hist.contains("P"));
+}
+
+#[test]
+fn steer_json_includes_memory_floor_and_profile() {
+    let dir = tmp_store();
+    let mailbox = dir.join("bridge");
+    fs::create_dir_all(mailbox.join("inbox")).unwrap();
+    let mut shop = Shop::init(dir.join("store"))
+        .unwrap()
+        .with_mailbox(Some(mailbox.clone()));
+    shop.remember(shop::MemoryTier::Profile, "standing fact")
+        .unwrap();
+    enroll(&mut shop, &["alice"]);
+    shop.open("P", "t", "b").unwrap();
+    shop.split("P", "c1", "alice", "src/a", "t", "b").unwrap();
+    let v = shop.steer("please look at the floor").unwrap();
+    assert_eq!(v["to"], "cursor-groksuperheavy");
+    assert!(v["memory"]["profile"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| x == "standing fact"));
+    assert!(v["memory"]["floor"]["children"].as_array().unwrap().len() >= 1);
+    assert!(v["memory"]["floor"]["claims"].as_array().unwrap().len() >= 1);
+    let inbox = mailbox.join("inbox/cursor-groksuperheavy");
+    let rec: serde_json::Value = fs::read_dir(&inbox)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+        .map(|p| serde_json::from_slice(&fs::read(p).unwrap()).unwrap())
+        .unwrap();
+    assert_eq!(rec["to"], "cursor-groksuperheavy");
+    assert!(rec["memory"]["floor"]["children"].is_array());
+    assert!(rec["memory"]["profile"].is_array());
+}
+
+#[test]
+fn steer_reply_file_is_ingested_into_api_steer() {
+    let dir = tmp_store();
+    let mailbox = dir.join("bridge");
+    fs::create_dir_all(mailbox.join("inbox/shop")).unwrap();
+    let shop = Shop::init(dir.join("store"))
+        .unwrap()
+        .with_mailbox(Some(mailbox.clone()));
+    fs::write(
+        mailbox.join("inbox/shop/reply-1.json"),
+        r#"{"type":"steer-reply","from":"cursor-groksuperheavy","to":"user","body":"I see the floor."}"#,
+    )
+    .unwrap();
+    let (addr, _h) = ui::spawn(shop, 0).unwrap();
+    let host = format!("{}:{}", addr.ip(), addr.port());
+    let body = http_get(&host, "/api/steer");
+    assert!(body.contains("I see the floor."), "{body}");
+    assert!(body.contains("orchestrator"), "{body}");
+}
+
+#[test]
+fn no_fake_orchestrator_line_when_mailbox_empty() {
+    let (shop, _dir) = fresh();
+    shop.ingest_replies().unwrap();
+    let text = shop.steer_transcript();
+    assert!(!text.iter().any(|l| l["role"] == "orchestrator"));
 }
 
 fn http_get(addr: &str, path: &str) -> String {

@@ -19,9 +19,11 @@ use crate::awareness::{
     Awareness, ChildView, GitHubAwareness, ParentView, ProjectView, WorkerView,
 };
 use crate::error::{Result, ShopError};
+use crate::floor::FloorMemory;
 use crate::github::{child_branch_name, GitHubRepo};
 use crate::hash::{fingerprint, unix_now};
 use crate::mailbox::{observe, write_assign, AssignRecord, MailboxObservation, DEFAULT_FROM};
+use crate::memory::{MemoryTier, ShopMemory};
 use crate::paths::{parse_paths, paths_overlap};
 use crate::project::{
     default_recents_path, format_recents, load_recents, origin_github_slug, project_name,
@@ -123,17 +125,23 @@ impl Shop {
         Ok(shop)
     }
 
-    /// Live GitHub repo list. WAIT if unauthenticated. Never invent slugs.
+    /// Live GitHub repo list. Public recorded slugs without a token. Never invent private slugs.
     pub fn github_repo_catalog(&self) -> Value {
-        if !self.github.authenticated() {
-            return json!("WAIT");
-        }
         match self
             .github
             .invoke("repos.search", json!({"query": "user:halthinks"}))
         {
             Ok(v) => json!(slugs_from_github_search(&v)),
-            Err(e) => json!(format!("WAIT: {e}")),
+            Err(e) => {
+                if !self.github.authenticated() {
+                    json!(crate::skills::PUBLIC_REPOS
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>())
+                } else {
+                    json!(format!("WAIT: {e}"))
+                }
+            }
         }
     }
 
@@ -218,6 +226,7 @@ impl Shop {
             "github_skills": github_skills,
             "note": "enrolls capacity only; does not create a job or lane",
         }))?;
+        self.note_memory(&format!("worker added {peer}"))?;
         Ok(worker)
     }
 
@@ -282,6 +291,7 @@ impl Shop {
             "repo": repo.slug(),
             "note": "token if any is written to .shop/github.token and is gitignored",
         }))?;
+        self.note_memory(&format!("github connected {}", repo.slug()))?;
         Ok(repo)
     }
 
@@ -428,6 +438,7 @@ impl Shop {
             "parent": id,
             "state": "HELD",
         }))?;
+        self.note_memory(&format!("job opened {id} HELD"))?;
         Ok(parent)
     }
 
@@ -503,6 +514,7 @@ impl Shop {
             "paths": child.paths,
             "note": "shop never invents a child lane; only split creates children",
         }))?;
+        self.note_memory(&format!("split {parent_id}/{child_id} peer={peer}"))?;
         Ok(child)
     }
 
@@ -649,6 +661,11 @@ impl Shop {
             "reason": reason,
             "note": "bounce stays tied to the same peer and paths",
         }))?;
+        self.note_memory(&format!(
+            "bounce {parent_id}/{child_id} stays peer={} paths={}",
+            bounced.peer,
+            bounced.paths.join(",")
+        ))?;
         Ok(bounced)
     }
 
@@ -740,6 +757,9 @@ impl Shop {
             pull_request_reason: pr_reason,
         };
         self.store.save(&state)?;
+        if let Some(p) = state.parents.get(parent_id) {
+            self.store.append_floor_history(p)?;
+        }
         let bytes = serde_json::to_vec_pretty(&package)?;
         self.store
             .write_under(format!("reduce/{parent_id}.json"), &bytes)?;
@@ -748,6 +768,7 @@ impl Shop {
             "parent": parent_id,
             "note": "reduce package is Evidence listing; does not land onto a canonical repo",
         }))?;
+        self.note_memory(&format!("reduce {parent_id} REDUCED"))?;
         Ok(package)
     }
 
@@ -806,6 +827,14 @@ impl Shop {
             "exit_code": record.exit_code,
             "note": "exit 0 is Evidence; CLOSE requires this recorded PASS",
         }))?;
+        match record.status {
+            EvidenceStatus::Wait => {
+                self.note_memory(&format!("verify {parent_id} WAIT"))?;
+            }
+            EvidenceStatus::Pass => {
+                self.note_memory(&format!("verify {parent_id} PASS"))?;
+            }
+        }
         Ok(record)
     }
 
@@ -924,12 +953,14 @@ impl Shop {
         parent.touch();
         let closed = parent.clone();
         state.claims.retain(|c| c.parent_id != parent_id);
+        self.store.append_floor_history(&closed)?;
         self.store.save(&state)?;
         self.event(json!({
             "op": "close",
             "parent": parent_id,
             "state": "CLOSED",
         }))?;
+        self.note_memory(&format!("closed {parent_id}"))?;
         Ok(closed)
     }
 
@@ -938,18 +969,20 @@ impl Shop {
     }
 
     pub fn awareness(&self, parent_id: Option<&str>) -> Result<Awareness> {
+        let _ = self.ingest_replies();
         let state = self.store.load()?;
         let roster = self.store.load_workers()?;
         let mailbox = self.observe_mailbox();
         let repo = self.store.load_github()?;
         let authed = self.github.authenticated();
+        let public_repo = repo
+            .as_ref()
+            .map(|r| crate::skills::is_recorded_public(&r.slug()))
+            .unwrap_or(false);
         let github_wait = if repo.is_none() {
             Some("WAIT: GitHub repo not connected".to_string())
-        } else if !authed {
-            Some(
-                "WAIT: GitHub token missing (.shop/github.token or GITHUB_TOKEN/GH_TOKEN or gh)"
-                    .to_string(),
-            )
+        } else if !authed && !public_repo {
+            Some("WAIT: private repo needs gh or token".to_string())
         } else {
             None
         };
@@ -1196,7 +1229,64 @@ impl Shop {
     }
 
     pub fn steer_transcript(&self) -> Vec<Value> {
+        let _ = self.ingest_replies();
         self.store.load_steer()
+    }
+
+    pub fn remember(&mut self, tier: MemoryTier, fact: &str) -> Result<ShopMemory> {
+        crate::memory::remember(self.store.root(), tier, fact)
+    }
+
+    pub fn forget(&mut self, fact: &str) -> Result<ShopMemory> {
+        crate::memory::forget(self.store.root(), fact)
+    }
+
+    pub fn memory(&self) -> ShopMemory {
+        self.store.load_memory()
+    }
+
+    pub fn memory_text(&self) -> String {
+        self.memory().format()
+    }
+
+    pub fn floor(&self) -> FloorMemory {
+        self.store.load_floor()
+    }
+
+    pub fn floor_text(&self) -> String {
+        self.floor().format()
+    }
+
+    pub fn memory_pack(&self) -> Value {
+        self.memory()
+            .pack_json(serde_json::to_value(self.floor()).unwrap_or(json!({})))
+    }
+
+    fn note_memory(&self, fact: &str) -> Result<()> {
+        crate::memory::append_log(self.store.root(), fact)
+    }
+
+    /// Read SuperGrokHeavy replies into steer.jsonl. Never invent a line.
+    pub fn ingest_replies(&self) -> Result<Vec<Value>> {
+        let found = crate::replies::scan_replies(self.store.root(), self.mailbox.as_deref());
+        if found.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut seen = crate::replies::load_seen(self.store.root());
+        let mut added = Vec::new();
+        for reply in found {
+            if seen.iter().any(|s| s == &reply.key) {
+                continue;
+            }
+            let line = SteerLine::new("orchestrator", &reply.body, None);
+            self.store.append_steer(&line)?;
+            seen.push(reply.key);
+            added.push(serde_json::to_value(&line).unwrap_or(json!({})));
+        }
+        if !added.is_empty() {
+            crate::replies::save_seen(self.store.root(), &seen)?;
+        }
+        Ok(added)
     }
 
     pub fn recents(&self) -> crate::project::Recents {
@@ -1209,6 +1299,7 @@ impl Shop {
 
     /// CONTROL plane. Local verbs run here. Free text goes to SuperGrokHeavy.
     pub fn steer(&mut self, text: &str) -> Result<Value> {
+        let _ = self.ingest_replies();
         let text = text.trim();
         if text.is_empty() {
             return Err(ShopError::IncompleteEvidence("empty steer".into()));
@@ -1216,7 +1307,11 @@ impl Shop {
         let user = SteerLine::new("user", text, None);
         self.store.append_steer(&user)?;
 
-        if let Some(verb) = parse_steer(text) {
+        let mut remembered = false;
+        if let Some(SteerVerb::Remember { tier, fact }) = parse_steer(text) {
+            self.remember(tier, &fact)?;
+            remembered = true;
+        } else if let Some(verb) = parse_steer(text) {
             let (body, wait) = self.run_steer_verb(verb)?;
             let shop_line = SteerLine::new("shop", body, wait);
             self.store.append_steer(&shop_line)?;
@@ -1227,13 +1322,22 @@ impl Shop {
             }));
         }
 
-        let (rec, _written, wait) =
-            steer_to_supergrok(&self.store.outbox_dir(), self.mailbox.as_deref(), text)?;
-        let mut line = SteerLine::new(
-            "shop",
-            format!("to SuperGrokHeavy ({})", rec.to),
-            wait.clone(),
-        );
+        let pack = self.memory_pack();
+        let (rec, _written, mut wait) = steer_to_supergrok(
+            &self.store.outbox_dir(),
+            self.mailbox.as_deref(),
+            text,
+            pack,
+        )?;
+        if let Some(boss_wait) = crate::replies::boss_cmd_wait() {
+            wait = Some(wait.unwrap_or(boss_wait));
+        }
+        let note = if remembered {
+            format!("remembered; to SuperGrokHeavy ({})", rec.to)
+        } else {
+            format!("to SuperGrokHeavy ({})", rec.to)
+        };
+        let mut line = SteerLine::new("shop", note, wait.clone());
         line.to = Some(rec.to.clone());
         self.store.append_steer(&line)?;
         Ok(json!({
@@ -1242,6 +1346,7 @@ impl Shop {
             "type": rec.type_,
             "wait": wait,
             "line": line,
+            "memory": rec.memory,
             "transcript": self.store.load_steer(),
         }))
     }
@@ -1335,6 +1440,9 @@ impl Shop {
                 let shown = next.project_root.display().to_string();
                 *self = next;
                 Ok((format!("opened project {shown}"), None))
+            }
+            SteerVerb::Remember { tier, fact } => {
+                Ok((format!("remembered {} ({})", fact, tier.as_str()), None))
             }
             SteerVerb::OpenRepo { spec } => {
                 let repo = self.github_connect(&spec, None, None)?;
