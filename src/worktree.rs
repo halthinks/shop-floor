@@ -100,8 +100,8 @@ pub fn ensure_child_worktree(
     }
 
     if !add_worktree(project_root, &dest, &branch) {
-        // git may leave an empty dest; do not treat that as isolation.
-        let _ = remove_if_empty_dir(&dest);
+        // git may leave a dest that is not a worktree; do not treat that as isolation.
+        remove_failed_dest(project_root, &dest, &branch);
         return Err(WorktreeWait::inconclusive(format!(
             "git worktree add failed for {branch} at {}; no fake worktree",
             dest.display()
@@ -109,6 +109,7 @@ pub fn ensure_child_worktree(
     }
 
     if !worktree_on_branch(&dest, &branch) {
+        remove_failed_dest(project_root, &dest, &branch);
         return Err(WorktreeWait::inconclusive(format!(
             "worktree add exited but {} is not on {branch}; incomplete evidence is WAIT",
             dest.display()
@@ -149,13 +150,14 @@ fn branch_exists(project: &Path, branch: &str) -> bool {
     git_ok(project, &["show-ref", "--verify", "--quiet", &spec])
 }
 
-fn remove_if_empty_dir(path: &Path) {
-    if path.is_dir()
-        && fs::read_dir(path)
-            .map(|mut i| i.next().is_none())
-            .unwrap_or(false)
-    {
-        let _ = fs::remove_dir(path);
+fn remove_failed_dest(project: &Path, path: &Path, branch: &str) {
+    if path.exists() && !worktree_on_branch(path, branch) {
+        let dest_s = path.to_string_lossy();
+        let _ = git_ok(project, &["worktree", "remove", "--force", dest_s.as_ref()]);
+        if path.exists() {
+            let _ = fs::remove_dir_all(path);
+        }
+        let _ = git_ok(project, &["worktree", "prune"]);
     }
 }
 
