@@ -1,16 +1,19 @@
 //! Thin clap front-end. All sequencing lives in the library.
 //!
 //! Suite reads (`awareness`, `mailbox`, `prove`, `workers`) print store truth.
-//! Missing evidence is WAIT. This file cannot CLOSE a parent or invent PASS.
+//! Accept / close / merge print WAIT when evidence is incomplete.
+//! Missing handoff status does not JOIN. An ASSIGNED child does not CLOSE.
+//! This file cannot invent PASS.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use crate::awareness::Awareness;
 use crate::engine::Shop;
+use crate::error::ShopError;
 use crate::mailbox::{resolve_mailbox, MailboxObservation, DEFAULT_FROM};
 use crate::procwait::ProcWaitLedger;
 use crate::proving;
@@ -418,13 +421,13 @@ fn dispatch(shop: &mut Shop, command: Commands) -> Result<()> {
             parent,
             child,
             handoff,
-        } => {
-            let h = shop.accept(&parent, &child, &handoff)?;
-            println!(
+        } => match shop.accept(&parent, &child, &handoff) {
+            Ok(h) => println!(
                 "accepted child {child} -> JOINED (handoff {} {})",
                 h.hash, h.status
-            );
-        }
+            ),
+            Err(e) => println!("{}", format_accept_wait(&parent, &child, &e)),
+        },
         Commands::Bounce {
             parent,
             child,
@@ -459,14 +462,18 @@ fn dispatch(shop: &mut Shop, command: Commands) -> Result<()> {
         Commands::Prove { parent } => {
             let state = shop.state()?;
             let pkg = load_reduce_package(shop.store_root(), &parent);
-            print!("{}", format_prove(&parent, state.parents.get(&parent), pkg.as_ref()));
+            print!(
+                "{}",
+                format_prove(&parent, state.parents.get(&parent), pkg.as_ref())
+            );
         }
         Commands::Intel {
             peer,
             backend,
             model,
         } => {
-            let w = shop.set_worker_intelligence(&peer, &backend, model.as_deref().unwrap_or(""))?;
+            let w =
+                shop.set_worker_intelligence(&peer, &backend, model.as_deref().unwrap_or(""))?;
             println!(
                 "intel {} backend={} model={} (capacity only; not a running worker)",
                 w.peer, w.intelligence.backend, w.intelligence.model
@@ -524,11 +531,11 @@ fn dispatch(shop: &mut Shop, command: Commands) -> Result<()> {
         }
         Commands::Close { parent } => match shop.close(&parent) {
             Ok(_) => println!("closed {parent}"),
-            Err(e) => bail!("{e}"),
+            Err(e) => println!("{}", format_close_wait(&parent, &e)),
         },
         Commands::Merge { parent } => match shop.merge_verified(&parent) {
             Ok(_) => println!("merged {parent} (verify PASS recorded)"),
-            Err(e) => bail!("{e}"),
+            Err(e) => println!("{}", format_merge_wait(&parent, &e)),
         },
         Commands::Wait {
             pid,
@@ -583,6 +590,56 @@ fn law_word(ok: bool) -> &'static str {
         "yes"
     } else {
         "WAIT"
+    }
+}
+
+/// Missing PASS/DONE handoff is WAIT. CLI does not print JOINED.
+fn format_accept_wait(parent: &str, child: &str, err: &ShopError) -> String {
+    match err {
+        ShopError::IncompleteEvidence(msg) => format!(
+            "accept {parent}/{child}: WAIT ({msg}); child not JOINED; never invent PASS"
+        ),
+        ShopError::ParentNotFound(_) => format!(
+            "accept {parent}/{child}: WAIT: parent not found; child not JOINED; never invent PASS"
+        ),
+        ShopError::ChildNotFound(_, _) => format!(
+            "accept {parent}/{child}: WAIT: child not found; child not JOINED; never invent PASS"
+        ),
+        ShopError::InvalidChildState { current, .. } => format!(
+            "accept {parent}/{child}: WAIT: child still {current}; child not JOINED; never invent PASS"
+        ),
+        other => format!(
+            "accept {parent}/{child}: WAIT ({other}); child not JOINED; never invent PASS"
+        ),
+    }
+}
+
+/// ASSIGNED child / not VERIFIED is WAIT. CLI does not print CLOSED.
+fn format_close_wait(parent: &str, err: &ShopError) -> String {
+    match err {
+        ShopError::ObligationOpen(_) => format!(
+            "close {parent}: WAIT (mandatory child still ASSIGNED); parent not CLOSED; never PASS"
+        ),
+        ShopError::CannotClose(_) => {
+            format!("close {parent}: WAIT (not VERIFIED); parent not CLOSED; never invent PASS")
+        }
+        ShopError::ParentNotFound(_) => {
+            format!("close {parent}: WAIT: parent not found; parent not CLOSED; never invent PASS")
+        }
+        other => format!("close {parent}: WAIT ({other}); parent not CLOSED; never invent PASS"),
+    }
+}
+
+/// Merge without recorded verify PASS is WAIT. CLI does not print merged.
+fn format_merge_wait(parent: &str, err: &ShopError) -> String {
+    match err {
+        ShopError::Wait(reason) => {
+            format!("merge {parent}: WAIT ({reason}); parent not merged; never invent PASS")
+        }
+        ShopError::ParentNotFound(_) => {
+            format!("merge {parent}: WAIT: parent not found; parent not merged; never invent PASS")
+        }
+        other => format!("merge {parent}: WAIT ({other}); parent not merged; never invent PASS"),
     }
 }
 
@@ -695,9 +752,7 @@ fn format_mailbox(obs: &MailboxObservation) -> String {
 }
 
 fn format_workers(roster: &WorkerRoster, awareness: Option<&Awareness>) -> String {
-    let mut out = String::from(
-        "WORKERS (capacity only; a roster name is not a running worker)\n",
-    );
+    let mut out = String::from("WORKERS (capacity only; a roster name is not a running worker)\n");
     if roster.workers.is_empty() {
         out.push_str("  (none; add via shop add or shop ui)\n");
         return out;
@@ -739,9 +794,8 @@ fn format_workers(roster: &WorkerRoster, awareness: Option<&Awareness>) -> Strin
 fn format_awareness(a: &Awareness) -> String {
     let jobs = a.jobs_from_workers();
     let waits = a.truth_waits();
-    let mut out = String::from(
-        "AWARENESS (truth panel; missing pieces are WAIT, never invented)\n",
-    );
+    let mut out =
+        String::from("AWARENESS (truth panel; missing pieces are WAIT, never invented)\n");
     out.push_str(&format!(
         "PROJECT  name={}  path={}  store={}\n",
         a.project.name, a.project.path, a.project.store
@@ -883,10 +937,7 @@ mod tests {
             parse(&["steer", "remember", "we", "ship"]).command,
             Commands::Steer { ref text } if text == &["remember", "we", "ship"]
         ));
-        assert!(matches!(
-            parse(&["processes"]).command,
-            Commands::Processes
-        ));
+        assert!(matches!(parse(&["processes"]).command, Commands::Processes));
     }
 
     #[test]
@@ -1047,5 +1098,78 @@ mod tests {
         let text = format_prove("P", Some(&p), None);
         assert!(text.contains("close: allowed"));
         assert!(text.contains("recorded_verify_pass: yes"));
+    }
+
+    #[test]
+    fn accept_missing_handoff_status_is_wait_not_joined() {
+        let text = format_accept_wait(
+            "P",
+            "c1",
+            &ShopError::IncompleteEvidence(
+                "WAIT: handoff missing PASS/DONE status; accept refuses to invent PASS".into(),
+            ),
+        );
+        assert!(text.contains("WAIT"));
+        assert!(text.contains("child not JOINED"));
+        assert!(text.contains("never invent PASS"));
+        assert!(!text.contains("-> JOINED"));
+        assert!(!text.contains("accepted child"));
+    }
+
+    #[test]
+    fn accept_unread_assign_is_hold_not_pass() {
+        let text = format_accept_wait(
+            "P",
+            "c1",
+            &ShopError::IncompleteEvidence(crate::mailbox::HOLD_UNREAD.into()),
+        );
+        assert!(text.contains("HOLD"));
+        assert!(text.contains("not PASS"));
+        assert!(text.contains("child not JOINED"));
+        assert!(!text.contains("-> JOINED"));
+    }
+
+    #[test]
+    fn close_assigned_child_is_wait_not_closed() {
+        let text = format_close_wait("P", &ShopError::ObligationOpen("P".into()));
+        assert!(text.contains("WAIT"));
+        assert!(text.contains("ASSIGNED"));
+        assert!(text.contains("parent not CLOSED"));
+        assert!(!text.contains("closed P"));
+        assert!(!text.contains("close: allowed"));
+    }
+
+    #[test]
+    fn close_not_verified_is_wait_not_closed() {
+        let text = format_close_wait("P", &ShopError::CannotClose("P".into()));
+        assert!(text.contains("WAIT (not VERIFIED)"));
+        assert!(text.contains("parent not CLOSED"));
+        assert!(!text.contains("closed P"));
+    }
+
+    #[test]
+    fn merge_without_verify_pass_is_wait_not_merged() {
+        let text = format_merge_wait(
+            "P",
+            &ShopError::Wait(
+                "merge blocked until shop verify recorded PASS / parent VERIFIED".into(),
+            ),
+        );
+        assert!(text.contains("WAIT"));
+        assert!(text.contains("parent not merged"));
+        assert!(text.contains("never invent PASS"));
+        assert!(!text.contains("merged P"));
+    }
+
+    #[test]
+    fn missing_parent_close_and_merge_are_wait() {
+        let close = format_close_wait("P", &ShopError::ParentNotFound("P".into()));
+        let merge = format_merge_wait("P", &ShopError::ParentNotFound("P".into()));
+        assert!(close.contains("WAIT: parent not found"));
+        assert!(close.contains("parent not CLOSED"));
+        assert!(merge.contains("WAIT: parent not found"));
+        assert!(merge.contains("parent not merged"));
+        assert!(!close.contains("closed P"));
+        assert!(!merge.contains("merged P"));
     }
 }
