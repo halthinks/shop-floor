@@ -43,6 +43,15 @@ pub const ONE_ASSIGN_IN_FLIGHT: &str =
 /// This file is the mailbox adapter. It does not invent a fifth product.
 pub const FIFTH_PRODUCT: bool = false;
 
+/// AASM stays look-only. This adapter does not vendor the kernel.
+pub const COPIES_KERNEL: bool = false;
+
+/// This file cannot CLOSE a parent. Handoff is Evidence, not authority.
+pub const CAN_CLOSE: bool = false;
+
+/// This file cannot mint VERIFIED. Observation is not a verify certificate.
+pub const CAN_MINT_VERIFIED: bool = false;
+
 /// Mailbox reply / handoff is Evidence. This adapter cannot CLOSE a parent.
 pub const HANDOFF_IS_EVIDENCE: &str =
     "handoff/mailbox reply is Evidence; cannot CLOSE or mark VERIFIED";
@@ -103,6 +112,33 @@ impl MailboxObservation {
     pub fn hold_in_flight(&self) -> bool {
         self.peers.iter().any(|p| p.latest_assign.is_some())
     }
+
+    /// This adapter never mints PASS. Missing path/inbox is WAIT; unread assign is HOLD.
+    pub fn is_pass(&self) -> bool {
+        false
+    }
+
+    /// A mailbox observation cannot CLOSE a parent.
+    pub fn can_close(&self) -> bool {
+        CAN_CLOSE
+    }
+
+    /// A mailbox handoff/reply cannot mint VERIFIED.
+    pub fn mints_verified(&self) -> bool {
+        CAN_MINT_VERIFIED
+    }
+
+    /// WAIT when the mailbox path/inbox is missing or forbidden.
+    /// HOLD when an unread assign is in flight. Never PASS.
+    pub fn hold_or_wait(&self) -> Option<&str> {
+        if let Some(w) = self.wait.as_deref() {
+            Some(w)
+        } else if self.hold_in_flight() {
+            Some(HOLD_UNREAD)
+        } else {
+            None
+        }
+    }
 }
 
 /// Windows mailbox default when `SHOP_MAILBOX` is unset. Not Platform.
@@ -130,10 +166,7 @@ fn mailbox_forbidden(root: &Path) -> bool {
 
 /// Windows device names (`CON`, `NUL`, …). Creating `inbox/CON` is not a peer.
 fn windows_reserved_device(raw: &str) -> bool {
-    let t = raw
-        .trim()
-        .trim_end_matches(['.', ' '])
-        .to_ascii_lowercase();
+    let t = raw.trim().trim_end_matches(['.', ' ']).to_ascii_lowercase();
     matches!(
         t.as_str(),
         "con"
@@ -217,13 +250,14 @@ fn slug_token(token: &str) -> String {
 
 /// Safe assign filename. `inbox_ok` is false when parent/lane would amplify.
 fn safe_assign_name(parent_id: &str, lane_id: &str) -> (String, bool) {
-    match (
-        sanitize_mail_token(parent_id),
-        sanitize_mail_token(lane_id),
-    ) {
+    match (sanitize_mail_token(parent_id), sanitize_mail_token(lane_id)) {
         (Some(p), Some(l)) => (format!("assign-{p}-{l}.json"), true),
         _ => (
-            format!("assign-{}-{}.json", slug_token(parent_id), slug_token(lane_id)),
+            format!(
+                "assign-{}-{}.json",
+                slug_token(parent_id),
+                slug_token(lane_id)
+            ),
             false,
         ),
     }
@@ -277,17 +311,27 @@ fn sanitize_peer(peer: &str) -> Option<&str> {
     Some(t)
 }
 
-/// Inbox is usable when the mailbox root exists and is not Platform.
-/// Missing inbox or a bad peer => outbox only.
+/// Inbox is usable when the mailbox root exists, is not Platform, and
+/// `inbox/` is already a directory. Missing inbox or a bad peer => outbox only.
+/// Do not create an inbox that was not there.
 fn inbox_peer_dir(root: &Path, peer: &str) -> Option<PathBuf> {
-    if !root.exists() || mailbox_forbidden(root) {
+    if !root.is_dir() || mailbox_forbidden(root) {
+        return None;
+    }
+    let inbox = root.join("inbox");
+    if !inbox.is_dir() {
         return None;
     }
     let peer = sanitize_peer(peer)?;
-    Some(root.join("inbox").join(peer))
+    Some(inbox.join(peer))
 }
 
-fn try_write_inbox(root: &Path, peer: &str, name: &str, record: &impl Serialize) -> Option<PathBuf> {
+fn try_write_inbox(
+    root: &Path,
+    peer: &str,
+    name: &str,
+    record: &impl Serialize,
+) -> Option<PathBuf> {
     let inbox_peer = inbox_peer_dir(root, peer)?;
     fs::create_dir_all(&inbox_peer).ok()?;
     let mail_path = inbox_peer.join(name);
@@ -411,7 +455,12 @@ pub fn write_steer(
     Ok(written)
 }
 
-fn wait_obs(root: Option<String>, present: bool, wait: String, outbox_count: usize) -> MailboxObservation {
+fn wait_obs(
+    root: Option<String>,
+    present: bool,
+    wait: String,
+    outbox_count: usize,
+) -> MailboxObservation {
     MailboxObservation {
         root,
         present,
@@ -437,7 +486,7 @@ pub fn observe(mailbox: Option<&Path>, outbox: &Path) -> MailboxObservation {
             outbox_count,
         );
     }
-    if !root.exists() {
+    if !root.is_dir() {
         let wait = format!("WAIT: mailbox directory missing at {root_s}");
         return wait_obs(Some(root_s), false, wait, outbox_count);
     }
@@ -617,7 +666,8 @@ mod tests {
         assert_eq!(written.len(), 2);
         let inbox = mailbox.join("inbox/alice/assign-P-c1.json");
         assert!(inbox.is_file());
-        let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&inbox).unwrap()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&inbox).unwrap()).unwrap();
         assert_eq!(v["type"], "assign");
         assert_eq!(v["from"], DEFAULT_FROM);
         assert_eq!(v["to"], "alice");
@@ -689,25 +739,33 @@ mod tests {
         let unset = observe(None, &outbox);
         assert!(!unset.present);
         assert_eq!(unset.wait.as_deref(), Some("WAIT: mailbox path unset"));
+        assert_eq!(unset.hold_or_wait(), Some("WAIT: mailbox path unset"));
         assert_eq!(unset.outbox_count, 1);
+        assert_never_pass(&unset);
 
         let missing = dir.join("no-root");
         let miss = observe(Some(&missing), &outbox);
         assert!(!miss.present);
-        assert!(miss.wait.unwrap().contains("missing"));
+        assert!(miss.wait.as_deref().unwrap().contains("missing"));
+        assert!(miss.hold_or_wait().unwrap().contains("WAIT"));
+        assert_never_pass(&miss);
 
         let forbidden = dir.join("TextPCB Platform");
         let hold = observe(Some(&forbidden), &outbox);
         assert!(!hold.present);
-        assert!(hold.wait.unwrap().contains("forbidden"));
+        assert!(hold.wait.as_deref().unwrap().contains("forbidden"));
+        assert!(hold.hold_or_wait().unwrap().contains("WAIT"));
         assert!(!forbidden.exists());
+        assert_never_pass(&hold);
 
         let root = dir.join("bridge");
         fs::create_dir_all(&root).unwrap();
         let no_inbox = observe(Some(&root), &outbox);
         assert!(no_inbox.present);
         assert!(!no_inbox.inbox_present);
-        assert!(no_inbox.wait.unwrap().contains("inbox missing"));
+        assert!(no_inbox.wait.as_deref().unwrap().contains("inbox missing"));
+        assert!(no_inbox.hold_or_wait().unwrap().contains("WAIT"));
+        assert_never_pass(&no_inbox);
 
         fs::create_dir_all(root.join("inbox/alice")).unwrap();
         fs::write(root.join("inbox/alice/assign-P-c1.json"), "{}").unwrap();
@@ -718,13 +776,38 @@ mod tests {
         assert_eq!(ok.unread_total, 1);
         assert_eq!(ok.peers.len(), 1);
         assert_eq!(ok.peers[0].peer, "alice");
-        assert_eq!(ok.peers[0].latest_assign.as_deref(), Some("assign-P-c1.json"));
+        assert_eq!(
+            ok.peers[0].latest_assign.as_deref(),
+            Some("assign-P-c1.json")
+        );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn assert_never_pass(obs: &MailboxObservation) {
+        assert!(!obs.is_pass());
+        assert!(!obs.can_close());
+        assert!(!obs.mints_verified());
+        assert!(!CAN_CLOSE);
+        assert!(!CAN_MINT_VERIFIED);
+        let v = serde_json::to_value(obs).unwrap();
+        assert!(v.get("pass").is_none());
+        assert!(v.get("verified").is_none());
+        assert!(v.get("status").is_none());
+        if let Some(word) = obs.hold_or_wait() {
+            assert!(
+                word.contains("WAIT") || word.contains("HOLD"),
+                "verdict must be WAIT or HOLD, got {word}"
+            );
+            assert!(!word.contains(" is PASS"));
+        }
     }
 
     #[test]
     fn adapter_is_not_a_fifth_product() {
         assert!(!FIFTH_PRODUCT);
+        assert!(!COPIES_KERNEL);
+        assert!(!CAN_CLOSE);
+        assert!(!CAN_MINT_VERIFIED);
         assert!(ONE_ASSIGN_IN_FLIGHT.contains("one unread assign"));
         assert!(!ONE_ASSIGN_IN_FLIGHT.contains("workers.rs"));
         assert!(HANDOFF_IS_EVIDENCE.contains("Evidence"));
@@ -783,8 +866,18 @@ mod tests {
         fs::create_dir_all(mailbox.join("inbox")).unwrap();
         let a = AssignRecord::from_child(DEFAULT_FROM, &child("c1", "alice"));
         let b = AssignRecord::from_child(DEFAULT_FROM, &child("c2", "bob"));
-        assert_eq!(write_assign(&outbox, Some(&mailbox), "P", &a).unwrap().len(), 2);
-        assert_eq!(write_assign(&outbox, Some(&mailbox), "P", &b).unwrap().len(), 2);
+        assert_eq!(
+            write_assign(&outbox, Some(&mailbox), "P", &a)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            write_assign(&outbox, Some(&mailbox), "P", &b)
+                .unwrap()
+                .len(),
+            2
+        );
         assert!(mailbox.join("inbox/alice/assign-P-c1.json").is_file());
         assert!(mailbox.join("inbox/bob/assign-P-c2.json").is_file());
         let _ = fs::remove_dir_all(&dir);
@@ -809,7 +902,13 @@ mod tests {
         let outbox = dir.join("outbox");
         let mailbox = dir.join("bridge");
         fs::create_dir_all(mailbox.join("inbox")).unwrap();
-        for peer in ["//server/share", r"\\server\share", "C:alice", "/alice", r"\alice"] {
+        for peer in [
+            "//server/share",
+            r"\\server\share",
+            "C:alice",
+            "/alice",
+            r"\alice",
+        ] {
             let rec = AssignRecord::from_child(DEFAULT_FROM, &child("c1", peer));
             let written = write_assign(&outbox, Some(&mailbox), "P", &rec).unwrap();
             assert_eq!(written.len(), 1, "peer {peer} must stay outbox-only");
@@ -851,7 +950,10 @@ mod tests {
             store.join("mailbox")
         );
         assert_eq!(
-            resolve_mailbox(Some(PathBuf::from(r"C:\Users\jetga\.textpcb-agent-bridge")), &store),
+            resolve_mailbox(
+                Some(PathBuf::from(r"C:\Users\jetga\.textpcb-agent-bridge")),
+                &store
+            ),
             PathBuf::from(r"C:\Users\jetga\.textpcb-agent-bridge")
         );
     }
@@ -867,13 +969,14 @@ mod tests {
         let ok = observe(Some(&root), &outbox);
         assert!(ok.present && ok.inbox_present);
         assert!(ok.wait.is_none());
-        assert_eq!(ok.peers[0].latest_handoff.as_deref(), Some("handoff-c1.json"));
-        let v = serde_json::to_value(&ok).unwrap();
-        assert!(v.get("pass").is_none());
-        assert!(v.get("verified").is_none());
-        assert!(v.get("status").is_none());
-        assert!(!HANDOFF_IS_EVIDENCE.contains("PASS"));
+        assert_eq!(
+            ok.peers[0].latest_handoff.as_deref(),
+            Some("handoff-c1.json")
+        );
         assert!(!ok.hold_in_flight());
+        assert!(ok.hold_or_wait().is_none());
+        assert!(!HANDOFF_IS_EVIDENCE.contains("PASS"));
+        assert_never_pass(&ok);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -895,12 +998,10 @@ mod tests {
         assert!(ok.present && ok.inbox_present);
         assert!(ok.wait.is_none());
         assert!(ok.hold_in_flight());
+        assert_eq!(ok.hold_or_wait(), Some(HOLD_UNREAD));
         assert_eq!(ok.unread_total, 1);
-        let v = serde_json::to_value(&ok).unwrap();
-        assert!(v.get("pass").is_none());
-        assert!(v.get("verified").is_none());
-        assert!(v.get("status").is_none());
         assert!(HOLD_UNREAD.contains("not PASS"));
+        assert_never_pass(&ok);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -948,5 +1049,172 @@ mod tests {
         assert_eq!(resolve_mailbox(Some(bad), &store), store.join("mailbox"));
         let tab = PathBuf::from("/tmp/bridge\troot");
         assert_eq!(resolve_mailbox(Some(tab), &store), store.join("mailbox"));
+    }
+
+    #[test]
+    fn write_assign_outbox_only_when_inbox_missing() {
+        let dir = scratch("no-inbox");
+        let outbox = dir.join("outbox");
+        let mailbox = dir.join("bridge");
+        fs::create_dir_all(&mailbox).unwrap();
+        let rec = AssignRecord::from_child(DEFAULT_FROM, &child("c1", "alice"));
+        let written = write_assign(&outbox, Some(&mailbox), "P", &rec).unwrap();
+        assert_eq!(written.len(), 1);
+        assert!(outbox.join("assign-P-c1.json").is_file());
+        assert!(!mailbox.join("inbox").exists());
+        let obs = observe(Some(&mailbox), &outbox);
+        assert!(obs.wait.as_deref().unwrap().contains("inbox missing"));
+        assert!(obs.hold_or_wait().unwrap().contains("WAIT"));
+        assert_never_pass(&obs);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_assign_succeeds_when_mailbox_none() {
+        let dir = scratch("no-root-opt");
+        let outbox = dir.join("outbox");
+        let rec = AssignRecord::from_child(DEFAULT_FROM, &child("c1", "alice"));
+        let written = write_assign(&outbox, None, "P", &rec).unwrap();
+        assert_eq!(written.len(), 1);
+        assert!(outbox.join("assign-P-c1.json").is_file());
+        let obs = observe(None, &outbox);
+        assert_eq!(obs.hold_or_wait(), Some("WAIT: mailbox path unset"));
+        assert_never_pass(&obs);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_assign_never_creates_platform_or_unc_root() {
+        let dir = scratch("no-plat-unc");
+        let outbox = dir.join("outbox");
+        let rec = AssignRecord::from_child(DEFAULT_FROM, &child("c1", "alice"));
+        let platform = PathBuf::from(r"C:\TextPCB Platform");
+        assert!(is_forbidden_project(&platform));
+        let written = write_assign(&outbox, Some(&platform), "P", &rec).unwrap();
+        assert_eq!(written.len(), 1);
+        assert!(outbox.join("assign-P-c1.json").is_file());
+        assert!(!platform.exists());
+        for root in [
+            PathBuf::from("//server/share"),
+            PathBuf::from(r"\\server\share"),
+        ] {
+            let written = write_assign(&outbox, Some(&root), "P", &rec).unwrap();
+            assert_eq!(written.len(), 1);
+            assert!(!root.exists());
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_assign_after_unread_consumed_may_land_again() {
+        let dir = scratch("consumed");
+        let outbox = dir.join("outbox");
+        let mailbox = dir.join("bridge");
+        fs::create_dir_all(mailbox.join("inbox")).unwrap();
+        let first = AssignRecord::from_child(DEFAULT_FROM, &child("c1", "alice"));
+        let second = AssignRecord::from_child(DEFAULT_FROM, &child("c2", "alice"));
+        assert_eq!(
+            write_assign(&outbox, Some(&mailbox), "P", &first)
+                .unwrap()
+                .len(),
+            2
+        );
+        fs::remove_file(mailbox.join("inbox/alice/assign-P-c1.json")).unwrap();
+        let written = write_assign(&outbox, Some(&mailbox), "P", &second).unwrap();
+        assert_eq!(written.len(), 2);
+        assert!(mailbox.join("inbox/alice/assign-P-c2.json").is_file());
+        assert!(!mailbox.join("inbox/alice/assign-P-c1.json").exists());
+        let obs = observe(Some(&mailbox), &outbox);
+        assert!(obs.hold_in_flight());
+        assert_eq!(obs.hold_or_wait(), Some(HOLD_UNREAD));
+        assert_never_pass(&obs);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_assign_handoff_does_not_count_as_in_flight_assign() {
+        let dir = scratch("handoff-not-assign");
+        let outbox = dir.join("outbox");
+        let mailbox = dir.join("bridge");
+        fs::create_dir_all(mailbox.join("inbox/alice")).unwrap();
+        fs::write(mailbox.join("inbox/alice/handoff-c0.json"), "{}").unwrap();
+        let rec = AssignRecord::from_child(DEFAULT_FROM, &child("c1", "alice"));
+        let written = write_assign(&outbox, Some(&mailbox), "P", &rec).unwrap();
+        assert_eq!(written.len(), 2);
+        assert!(mailbox.join("inbox/alice/assign-P-c1.json").is_file());
+        let obs = observe(Some(&mailbox), &outbox);
+        assert!(obs.hold_in_flight());
+        assert_eq!(
+            obs.peers[0].latest_handoff.as_deref(),
+            Some("handoff-c0.json")
+        );
+        assert_eq!(obs.hold_or_wait(), Some(HOLD_UNREAD));
+        assert_never_pass(&obs);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_unread_assign_blocks_second_and_stays_hold() {
+        let dir = scratch("hold-second");
+        let outbox = dir.join("outbox");
+        let mailbox = dir.join("bridge");
+        fs::create_dir_all(mailbox.join("inbox")).unwrap();
+        let first = AssignRecord::from_child(DEFAULT_FROM, &child("c1", "alice"));
+        let second = AssignRecord::from_child(DEFAULT_FROM, &child("c2", "alice"));
+        assert_eq!(
+            write_assign(&outbox, Some(&mailbox), "P", &first)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            write_assign(&outbox, Some(&mailbox), "P", &second)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(outbox.join("assign-P-c2.json").is_file());
+        assert!(!mailbox.join("inbox/alice/assign-P-c2.json").exists());
+        let obs = observe(Some(&mailbox), &outbox);
+        assert_eq!(obs.unread_total, 1);
+        assert_eq!(
+            obs.peers[0].latest_assign.as_deref(),
+            Some("assign-P-c1.json")
+        );
+        assert!(obs.hold_in_flight());
+        assert_eq!(obs.hold_or_wait(), Some(HOLD_UNREAD));
+        assert_never_pass(&obs);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_steer_outbox_only_when_inbox_missing() {
+        let dir = scratch("steer-no-inbox");
+        let outbox = dir.join("outbox");
+        let mailbox = dir.join("bridge");
+        fs::create_dir_all(&mailbox).unwrap();
+        let rec = SteerRecord::new("hello");
+        let written = write_steer(&outbox, Some(&mailbox), &rec).unwrap();
+        assert_eq!(written.len(), 1);
+        assert!(!mailbox.join("inbox").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn observe_mailbox_file_is_wait_never_pass() {
+        let dir = scratch("mail-file");
+        let outbox = dir.join("outbox");
+        fs::create_dir_all(&outbox).unwrap();
+        let mailbox = dir.join("bridge");
+        fs::write(&mailbox, b"not-a-dir").unwrap();
+        let rec = AssignRecord::from_child(DEFAULT_FROM, &child("c1", "alice"));
+        let written = write_assign(&outbox, Some(&mailbox), "P", &rec).unwrap();
+        assert_eq!(written.len(), 1);
+        let obs = observe(Some(&mailbox), &outbox);
+        assert!(!obs.present);
+        assert!(obs.hold_or_wait().unwrap().contains("WAIT"));
+        assert!(!obs.hold_or_wait().unwrap().contains("PASS"));
+        assert_never_pass(&obs);
+        let _ = fs::remove_dir_all(&dir);
     }
 }
