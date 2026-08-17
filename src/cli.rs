@@ -102,7 +102,18 @@ pub enum Commands {
         body: String,
     },
     /// Emit mailbox-shaped assign records for undispatched ASSIGNED children
-    Assign { parent: String },
+    Assign {
+        parent: String,
+        /// Launch configured processes after the worktree hook
+        #[arg(long)]
+        run: bool,
+    },
+    /// Launch the configured process for an assigned child
+    Run {
+        parent: String,
+        #[arg(long)]
+        child: String,
+    },
     /// Record a child handoff (PASS/DONE). Child -> JOINED
     Accept {
         parent: String,
@@ -335,8 +346,12 @@ fn dispatch(shop: &mut Shop, command: Commands) -> Result<()> {
             shop.split(&parent, &child, &peer, &paths, &title, &body)?;
             println!("split child {child} on {parent} -> ASSIGNED (peer={peer} paths={paths})");
         }
-        Commands::Assign { parent } => {
-            let recs = shop.assign(&parent)?;
+        Commands::Assign { parent, run } => {
+            let recs = if run {
+                shop.assign_and_run(&parent)?
+            } else {
+                shop.assign(&parent)?
+            };
             if recs.is_empty() {
                 println!("no undispatched ASSIGNED children on {parent}");
             } else {
@@ -345,6 +360,20 @@ fn dispatch(shop: &mut Shop, command: Commands) -> Result<()> {
                     recs.len(),
                     shop.store_root().display()
                 );
+            }
+        }
+        Commands::Run { parent, child } => {
+            let ev = shop.run_child(&parent, &child)?;
+            match ev.pid {
+                Some(pid) => println!(
+                    "run {parent}/{child}: pid {pid} (start is Evidence, not VERIFIED); {}",
+                    ev.note
+                ),
+                None => println!(
+                    "run {parent}/{child}: {} ({}); assign kept, no fake pid",
+                    ev.class.as_str(),
+                    ev.note
+                ),
             }
         }
         Commands::Accept {

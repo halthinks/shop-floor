@@ -82,6 +82,8 @@ Durable JSON under `.shop/` (gitignored). Events: `.shop/events.jsonl` (also `GE
 
 `.shop/worktrees/<parent>/<child>` is a real git worktree on `shop/<parent>/<child>`, created on `assign` when the opened project is a git repo. Not a git repo, or worktree add failure, is Inconclusive / WAIT — never a fake worktree or fake branch. A worktree is isolation evidence, not JOIN/VERIFY/CLOSE authority.
 
+`shop run PARENT --child ID` launches the configured process (`SHOP_RUN_CMD` or `.shop/run.json`). No command is Inconclusive — the assign stays, no fake PID. Start/exit are Evidence, not VERIFIED. `shop assign PARENT --run` or `SHOP_RUN=1` launches after the worktree hook. `shop wait` / `shop stop` already track real PIDs.
+
 ```bash
 cargo test
 cargo build --release
