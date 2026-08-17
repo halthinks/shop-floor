@@ -1,6 +1,8 @@
 //! Thin clap front-end. All sequencing lives in the library.
 //!
 //! Suite reads (`awareness`, `mailbox`, `prove`, `workers`) print store truth.
+//! Suite waits (unread assign, missing pid, missing GitHub counts) stay WAIT.
+//! Close / merge / accept never invent PASS. Handoff is Evidence, not CLOSE.
 //! Missing evidence is WAIT. This file cannot CLOSE a parent or invent PASS.
 
 use std::fs;
@@ -418,13 +420,13 @@ fn dispatch(shop: &mut Shop, command: Commands) -> Result<()> {
             parent,
             child,
             handoff,
-        } => {
-            let h = shop.accept(&parent, &child, &handoff)?;
-            println!(
-                "accepted child {child} -> JOINED (handoff {} {})",
+        } => match shop.accept(&parent, &child, &handoff) {
+            Ok(h) => println!(
+                "accepted child {child} -> JOINED (handoff {} {} is Evidence; cannot CLOSE; never invent PASS)",
                 h.hash, h.status
-            );
-        }
+            ),
+            Err(e) => bail!("{}", wait_op("accept", &format!("{parent}/{child}"), e)),
+        },
         Commands::Bounce {
             parent,
             child,
@@ -524,11 +526,13 @@ fn dispatch(shop: &mut Shop, command: Commands) -> Result<()> {
         }
         Commands::Close { parent } => match shop.close(&parent) {
             Ok(_) => println!("closed {parent}"),
-            Err(e) => bail!("{e}"),
+            Err(e) => bail!("{}", wait_op("close", &parent, e)),
         },
         Commands::Merge { parent } => match shop.merge_verified(&parent) {
-            Ok(_) => println!("merged {parent} (verify PASS recorded)"),
-            Err(e) => bail!("{e}"),
+            Ok(_) => println!(
+                "merged {parent} (verify PASS recorded; merge ACK is not CLOSE)"
+            ),
+            Err(e) => bail!("{}", wait_op("merge", &parent, e)),
         },
         Commands::Wait {
             pid,
@@ -586,6 +590,11 @@ fn law_word(ok: bool) -> &'static str {
     }
 }
 
+/// Fail-closed operator line. Errors stay WAIT and never print PASS.
+fn wait_op(op: &str, target: &str, err: impl std::fmt::Display) -> String {
+    format!("{op} {target}: WAIT ({err}); never PASS")
+}
+
 /// Fail-closed proving readout. Missing parent cannot print close PASS.
 fn format_prove(id: &str, parent: Option<&Parent>, reduce: Option<&ReducePackage>) -> String {
     let mut out = format!("PROVE parent={id}\n");
@@ -605,6 +614,7 @@ fn format_prove(id: &str, parent: Option<&Parent>, reduce: Option<&ReducePackage
     } else {
         out.push_str("  close: WAIT (not VERIFIED or assigned child still open)\n");
     }
+    out.push_str("  handoff_mailbox_github: Evidence; cannot CLOSE\n");
     out.push_str(&format!(
         "  recorded_verify_pass: {}\n",
         law_word(proving::recorded_verify_pass(parent))
@@ -740,7 +750,7 @@ fn format_awareness(a: &Awareness) -> String {
     let jobs = a.jobs_from_workers();
     let waits = a.truth_waits();
     let mut out = String::from(
-        "AWARENESS (truth panel; missing pieces are WAIT, never invented)\n",
+        "AWARENESS (truth panel; missing pieces are WAIT, never invented; cannot CLOSE)\n",
     );
     out.push_str(&format!(
         "PROJECT  name={}  path={}  store={}\n",
@@ -816,6 +826,9 @@ fn format_awareness(a: &Awareness) -> String {
             a.mailbox.outbox_count,
             a.mailbox.hold_in_flight()
         ));
+        if a.mailbox.hold_in_flight() {
+            out.push_str("  HOLD: unread assign in flight; not PASS; cannot CLOSE\n");
+        }
     }
     out
 }
@@ -914,6 +927,7 @@ mod tests {
         let text = format_prove("P", Some(&p), None);
         assert!(text.contains("close: WAIT"));
         assert!(text.contains("assigned_child_open: yes"));
+        assert!(text.contains("handoff_mailbox_github: Evidence; cannot CLOSE"));
         assert!(text.contains("reduce_is_not_recombine: WAIT (no reduce package)"));
         assert!(!text.contains("close: allowed"));
     }
@@ -1047,5 +1061,73 @@ mod tests {
         let text = format_prove("P", Some(&p), None);
         assert!(text.contains("close: allowed"));
         assert!(text.contains("recorded_verify_pass: yes"));
+        assert!(text.contains("handoff_mailbox_github: Evidence; cannot CLOSE"));
+    }
+
+    #[test]
+    fn wait_op_is_wait_never_pass() {
+        let text = wait_op("close", "P", "not VERIFIED");
+        assert!(text.contains("close P: WAIT"));
+        assert!(text.contains("never PASS"));
+        assert!(!text.contains("closed P"));
+        let merge = wait_op("merge", "P", "merge blocked until shop verify recorded PASS");
+        assert!(merge.contains("merge P: WAIT"));
+        assert!(merge.contains("never PASS"));
+    }
+
+    #[test]
+    fn awareness_hold_cannot_close() {
+        let a = Awareness {
+            store_ok: true,
+            project: ProjectView {
+                name: "demo".into(),
+                path: "/tmp/demo".into(),
+                store: "/tmp/demo/.shop".into(),
+            },
+            workers: vec![],
+            claims: vec![],
+            parents: vec![],
+            mailbox: MailboxObservation {
+                root: Some("/tmp/mail".into()),
+                present: true,
+                inbox_present: true,
+                wait: None,
+                peers: vec![PeerInbox {
+                    peer: "alice".into(),
+                    unread: 1,
+                    latest_assign: Some("assign.json".into()),
+                    latest_handoff: None,
+                }],
+                unread_total: 1,
+                outbox_count: 0,
+            },
+            github: GitHubAwareness {
+                repo: None,
+                default_branch: None,
+                authenticated: false,
+                token_present: false,
+                wait: Some("WAIT: GitHub not connected".into()),
+                checks: json!({}),
+                issue_count: None,
+                pr_count: None,
+                check_count: None,
+            },
+            events: vec![],
+            waits: vec![],
+        };
+        let text = format_awareness(&a);
+        assert!(text.contains("cannot CLOSE"));
+        assert!(text.contains("HOLD: unread assign in flight"));
+        assert!(text.contains("not PASS"));
+        assert!(text.contains("hold_in_flight=true"));
+        assert!(!text.contains("issues=0"));
+    }
+
+    #[test]
+    fn missing_parent_prove_names_handoff_as_evidence() {
+        let text = format_prove("P", None, None);
+        assert!(text.contains("WAIT: parent not found"));
+        assert!(!text.contains("handoff_mailbox_github: Evidence"));
+        assert!(!text.contains("close: allowed"));
     }
 }
