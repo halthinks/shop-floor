@@ -1,8 +1,9 @@
 //! Multiple open floors: switch without losing the other project's memory/floor.
 //! Incomplete evidence is WAIT, never a fake PASS.
 
+// Test crate is also named `projects`. Do not `mod projects` here.
 #[path = "../src/projects.rs"]
-mod projects;
+mod floor_set;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,7 +13,7 @@ use shop::memory::MemoryTier;
 use shop::types::{EvidenceStatus, ParentState};
 use shop::{Shop, ShopError};
 
-use projects::FloorSet;
+use floor_set::FloorSet;
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
