@@ -80,6 +80,8 @@ To launch SuperGrokHeavy / Grok Build on a steer, set `SHOP_BOSS_CMD` to a comma
 
 Durable JSON under `.shop/` (gitignored). Events: `.shop/events.jsonl` (also `GET /feed.xml` and `shop log`). Floor and shop memory live beside the snapshot. If the UI process dies, the CLI still works on the same store. One path failing does not blank the others.
 
+`.shop/worktrees/<parent>/<child>` is a real git worktree on `shop/<parent>/<child>`, created on `assign` when the opened project is a git repo. Not a git repo, or worktree add failure, is Inconclusive / WAIT — never a fake worktree or fake branch. A worktree is isolation evidence, not JOIN/VERIFY/CLOSE authority.
+
 ```bash
 cargo test
 cargo build --release

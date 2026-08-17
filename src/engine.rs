@@ -587,6 +587,15 @@ impl Shop {
             child.dispatched = true;
             records.push(rec);
         }
+        for rec in &records {
+            if let Err(wait) =
+                crate::worktree::ensure_child_worktree(&self.project_root, parent_id, &rec.lane_id)
+            {
+                if crate::worktree::project_is_git_repo(&self.project_root) {
+                    return Err(ShopError::Wait(wait.reason));
+                }
+            }
+        }
         if !parent.children.is_empty() {
             parent.state = ParentState::InFlight;
         }
