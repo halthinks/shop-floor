@@ -2,6 +2,8 @@
 
 This PR is the floor: hold-split-join, workers as capacity, GitHub (public now, private with token), project picker, Talk to the boss, shop memory, floor memory, file-based reply ingest.
 
+Shop is the AASM proving ground. It does not copy the kernel. See `src/aasm_map.rs` and `docs/AASM_PROVING_GROUND.md`. Proving-ground tests in `tests/aasm_proving.rs` stay required.
+
 Next, in order:
 
 1. Run workers

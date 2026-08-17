@@ -82,6 +82,9 @@ pub enum Commands {
         title: String,
         #[arg(long)]
         body: String,
+        /// Optional claimed paths (parent-subset lease). Empty: children define claims.
+        #[arg(long)]
+        paths: Option<String>,
     },
     /// Add a child. REJECT overlapping in-flight allowed_paths.
     Split {
@@ -300,8 +303,13 @@ fn dispatch(shop: &mut Shop, command: Commands) -> Result<()> {
                 println!("connected GitHub repo {}", r.slug());
             }
         },
-        Commands::Open { id, title, body } => {
-            shop.open(&id, &title, &body)?;
+        Commands::Open {
+            id,
+            title,
+            body,
+            paths,
+        } => {
+            shop.open_with_scope(&id, &title, &body, paths.as_deref().unwrap_or(""))?;
             println!("opened parent {id} in HELD");
         }
         Commands::Split {
