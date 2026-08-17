@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::mailbox::MailboxObservation;
+use crate::procwait::{LiveProcess, PidLiveness};
 use crate::types::{ChildState, Claim, EvidenceStatus, ParentState};
 use crate::workers::{Intelligence, Worker};
 
@@ -52,10 +53,14 @@ pub struct WorkerView {
     pub name: String,
     pub intelligence: Intelligence,
     pub github_skills: bool,
-    /// idle | assigned | working | bounced | wait | live
+    /// idle | assigned | working | bounced | wait | live | dead
     pub action: String,
     pub action_reason: Option<String>,
     pub unread: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid_liveness: Option<PidLiveness>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,8 +86,17 @@ pub struct Awareness {
 }
 
 impl WorkerView {
-    pub fn from_worker(w: Worker, parents: &[ParentView], mailbox: &MailboxObservation) -> Self {
-        let (action, action_reason, unread) = classify_action(&w.peer, parents, mailbox);
+    pub fn from_worker(
+        w: Worker,
+        parents: &[ParentView],
+        mailbox: &MailboxObservation,
+        processes: &[LiveProcess],
+    ) -> Self {
+        let (action, action_reason, unread) = classify_action(&w.peer, parents, mailbox, processes);
+        let tracked = processes
+            .iter()
+            .filter(|p| p.peer.as_deref() == Some(w.peer.as_str()))
+            .max_by_key(|p| p.updated_at);
         Self {
             peer: w.peer,
             name: w.name,
@@ -91,17 +105,19 @@ impl WorkerView {
             action,
             action_reason,
             unread,
+            pid: tracked.map(|p| p.pid),
+            pid_liveness: tracked.map(|p| p.liveness),
         }
     }
 }
 
-/// Derive the live action pill from store + mailbox observe.
-/// `working` only when a handoff is observed while the child is still ASSIGNED.
-/// Unknown is WAIT. Never fake working.
+/// Derive the live action pill from store + mailbox + live pid observe.
+/// An alive pid is working. A dead pid is not working. Never fake working.
 pub fn classify_action(
     peer: &str,
     parents: &[ParentView],
     mailbox: &MailboxObservation,
+    processes: &[LiveProcess],
 ) -> (String, Option<String>, usize) {
     let mut has_assigned = false;
     let mut has_bounced = false;
@@ -128,6 +144,24 @@ pub fn classify_action(
         return (
             "bounced".into(),
             Some("child bounced; same peer/paths".into()),
+            unread,
+        );
+    }
+    let latest_pid = processes
+        .iter()
+        .filter(|p| p.peer.as_deref() == Some(peer))
+        .max_by_key(|p| p.updated_at);
+    if let Some(proc) = latest_pid {
+        if proc.liveness == PidLiveness::Working {
+            return (
+                "working".into(),
+                Some(format!("live pid {} is working", proc.pid)),
+                unread,
+            );
+        }
+        return (
+            "dead".into(),
+            Some(format!("pid {} is dead; not working", proc.pid)),
             unread,
         );
     }

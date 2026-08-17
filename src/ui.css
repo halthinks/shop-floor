@@ -141,6 +141,7 @@ h2 {
 .action-pill.working { color: var(--ice); background: rgba(125,211,252,0.20); }
 .action-pill.live { color: var(--celadon); background: rgba(110,231,183,0.25); }
 .action-pill.wait { color: var(--champagne); background: rgba(245,208,160,0.25); }
+.action-pill.dead { color: var(--stone); background: rgba(161,161,170,0.28); }
 .action-pill.bounced { color: var(--rose); background: rgba(253,164,175,0.20); }
 
 .breathe { animation: breathe 1.8s ease-in-out infinite; }

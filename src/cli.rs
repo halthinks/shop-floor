@@ -139,6 +139,18 @@ pub enum Commands {
     Close { parent: String },
     /// Merge the reduce PR. Blocked until verify PASS / VERIFIED. No prompt.
     Merge { parent: String },
+    /// Wait on a live process. Exit is Evidence only — never VERIFIED/CLOSED.
+    Wait {
+        pid: u32,
+        #[arg(long)]
+        parent: Option<String>,
+        #[arg(long)]
+        child: Option<String>,
+        #[arg(long)]
+        peer: Option<String>,
+    },
+    /// Explicit operator stop. Waiting is not stopping.
+    Stop { pid: u32 },
     /// Open a local project folder or list recents
     Project {
         #[command(subcommand)]
@@ -407,6 +419,44 @@ fn dispatch(shop: &mut Shop, command: Commands) -> Result<()> {
             Ok(_) => println!("merged {parent} (verify PASS recorded)"),
             Err(e) => bail!("{e}"),
         },
+        Commands::Wait {
+            pid,
+            parent,
+            child,
+            peer,
+        } => {
+            let rec = shop.wait_pid(pid, parent.as_deref(), child.as_deref(), peer.as_deref())?;
+            let parent_state = parent.as_deref().and_then(|id| {
+                shop.state()
+                    .ok()
+                    .and_then(|s| s.parents.get(id).map(|p| p.state))
+            });
+            match rec.class {
+                crate::aasm_map::EvidenceClass::Unknown => {
+                    println!(
+                        "wait {pid}: UNKNOWN (dead pid, no exit); not PASS; parent not VERIFIED"
+                    );
+                }
+                _ => {
+                    println!(
+                        "wait {pid}: exit {:?} as Evidence ({}); parent not VERIFIED",
+                        rec.exit_code,
+                        rec.class.as_str()
+                    );
+                }
+            }
+            if let Some(state) = parent_state {
+                println!("  parent still {state} (wait does not verify or close)");
+            }
+        }
+        Commands::Stop { pid } => {
+            let rec = shop.stop_pid(pid)?;
+            println!(
+                "stop {pid}: explicit ({}); waiting is not stopping; pill={}",
+                rec.liveness,
+                rec.liveness.status_pill()
+            );
+        }
     }
     Ok(())
 }

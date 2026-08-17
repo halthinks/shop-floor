@@ -73,6 +73,7 @@
         <span class="action-pill working">working</span>
         <span class="action-pill live">live</span>
         <span class="action-pill wait">wait</span>
+        <span class="action-pill dead">dead</span>
         <span class="action-pill bounced">bounced</span>
       </div>
     </section>
@@ -195,11 +196,11 @@ async function j(url, opt){
 }
 function pillClass(action){
   const a = String(action||'wait').toLowerCase();
-  if (['idle','assigned','working','live','wait','bounced'].includes(a)) return a;
+  if (['idle','assigned','working','live','wait','dead','bounced'].includes(a)) return a;
   return 'wait';
 }
 function pillWord(action){
-  return ({idle:'Idle',assigned:'Assigned',working:'Working',live:'Live',wait:'Waiting',bounced:'Bounced'})[pillClass(action)] || 'Waiting';
+  return ({idle:'Idle',assigned:'Assigned',working:'Working',live:'Live',wait:'Waiting',dead:'Dead',bounced:'Bounced'})[pillClass(action)] || 'Waiting';
 }
 function aiWords(backend){
   return ({cursor:'Cursor','cursor-ultra':'Cursor Ultra','grok-ultra':'Grok Ultra','grok-bot':'Grok Bot','grok-build':'SuperGrokHeavy'})[backend] || backend || 'AI';
@@ -231,7 +232,9 @@ function eventSentence(e){
     'mailbox WAIT': 'Mailbox was missing for an assign.',
     'merge blocked': 'Merge stayed blocked.',
     'merge allowed': 'Merge was recorded.',
-    'close': 'The parent job was closed.'
+    'close': 'The parent job was closed.',
+    'wait': 'A live process was waited on (Evidence only).',
+    'stop': 'A process was stopped explicitly.'
   };
   const base = map[op] || (op ? String(op) : 'Something was recorded.');
   return who ? base.replace(/\.$/, '') + ' (' + who + ').' : base;

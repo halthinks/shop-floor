@@ -23,6 +23,7 @@ pub mod hash;
 pub mod mailbox;
 pub mod memory;
 pub mod paths;
+pub mod procwait;
 pub mod project;
 pub mod proving;
 pub mod replies;
@@ -47,6 +48,9 @@ pub use mailbox::{
     AssignRecord, MailboxObservation, CLAIM_CEILING, DEFAULT_FROM, SCHEMA_VERSION, STEER_TO,
 };
 pub use memory::{MemoryTier, ShopMemory};
+pub use procwait::{
+    status_pill, LiveProcess, PidLiveness, ProcWaitLedger, StopRecord, WaitEvidence,
+};
 pub use skills::{GitHubSkills, NullGitHub, SKILL_PACK};
 pub use skills_mock::MockGitHub;
 pub use types::{

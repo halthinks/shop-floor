@@ -25,6 +25,7 @@ use crate::hash::{fingerprint, unix_now};
 use crate::mailbox::{observe, write_assign, AssignRecord, MailboxObservation, DEFAULT_FROM};
 use crate::memory::{MemoryTier, ShopMemory};
 use crate::paths::{parse_paths, paths_overlap};
+use crate::procwait::{self, LiveProcess, ProcWaitLedger, ProcessBind, StopRecord, WaitEvidence};
 use crate::project::{
     default_recents_path, format_recents, load_recents, origin_github_slug, project_name,
     project_root_from_store, recent_path_for_repo, record_recent, refuse_platform,
@@ -1030,6 +1031,140 @@ impl Shop {
         Ok(closed)
     }
 
+    /// Register a live pid for wait/stop/pills. Does not verify or close.
+    pub fn track_pid(
+        &mut self,
+        pid: u32,
+        parent_id: Option<&str>,
+        child_id: Option<&str>,
+        peer: Option<&str>,
+    ) -> Result<LiveProcess> {
+        self.ensure_parent_bind(parent_id)?;
+        let mut ledger = procwait::load_ledger(self.store.root())?;
+        let bind = ProcessBind::new(parent_id, child_id, peer);
+        let proc = LiveProcess::observed(pid, bind);
+        ledger.upsert(proc.clone());
+        procwait::save_ledger(self.store.root(), &ledger)?;
+        Ok(proc)
+    }
+
+    /// Wait on a live pid. Records exit as Evidence only.
+    /// Never calls verify/close. Never moves a parent to VERIFIED or CLOSED.
+    pub fn wait_pid(
+        &mut self,
+        pid: u32,
+        parent_id: Option<&str>,
+        child_id: Option<&str>,
+        peer: Option<&str>,
+    ) -> Result<WaitEvidence> {
+        procwait::refuse_self_or_init(pid, "wait")?;
+        self.track_pid(pid, parent_id, child_id, peer)?;
+        procwait::wait_until_dead(pid);
+        self.record_wait(pid, None)
+    }
+
+    /// Wait on an owned child so the exit code can be recorded as Evidence.
+    /// Never calls verify/close. Never moves a parent to VERIFIED or CLOSED.
+    pub fn wait_child(
+        &mut self,
+        child: &mut std::process::Child,
+        parent_id: Option<&str>,
+        child_id: Option<&str>,
+        peer: Option<&str>,
+    ) -> Result<WaitEvidence> {
+        let pid = child.id();
+        procwait::refuse_self_or_init(pid, "wait")?;
+        self.track_pid(pid, parent_id, child_id, peer)?;
+        let exit = procwait::wait_owned_child(child);
+        self.record_wait(pid, exit)
+    }
+
+    /// Explicit operator stop. Waiting is not stopping.
+    pub fn stop_pid(&mut self, pid: u32) -> Result<StopRecord> {
+        procwait::signal_stop(pid)?;
+        let mut ledger = procwait::load_ledger(self.store.root())?;
+        let rec = procwait::apply_stop(&mut ledger, pid);
+        procwait::save_ledger(self.store.root(), &ledger)?;
+        self.event(json!({
+            "op": "stop",
+            "pid": pid,
+            "explicit": true,
+            "note": procwait::STOP_NOTE,
+        }))?;
+        self.note_memory(&format!("stop pid {pid} (explicit)"))?;
+        Ok(rec)
+    }
+
+    pub fn procwait(&self) -> Result<ProcWaitLedger> {
+        let mut ledger = procwait::load_ledger(self.store.root())?;
+        ledger.refresh_liveness();
+        Ok(ledger)
+    }
+
+    fn record_wait(&mut self, pid: u32, exit_code: Option<i32>) -> Result<WaitEvidence> {
+        let parent_before = self.parent_states_snapshot()?;
+        let mut ledger = procwait::load_ledger(self.store.root())?;
+        let evidence = procwait::apply_wait(&mut ledger, pid, exit_code);
+        procwait::save_ledger(self.store.root(), &ledger)?;
+        self.event(json!({
+            "op": "wait",
+            "pid": pid,
+            "exit_code": exit_code,
+            "status": evidence.status.to_string(),
+            "class": evidence.class.as_str(),
+            "note": evidence.aasm_note,
+        }))?;
+        self.note_memory(&format!(
+            "wait pid {pid} exit={exit_code:?} {}",
+            evidence.class.as_str()
+        ))?;
+        self.assert_wait_did_not_promote(&parent_before)?;
+        Ok(evidence)
+    }
+
+    fn ensure_parent_bind(&self, parent_id: Option<&str>) -> Result<()> {
+        let Some(id) = parent_id.filter(|s| !s.is_empty()) else {
+            return Ok(());
+        };
+        let state = self.store.load()?;
+        if !state.parents.contains_key(id) {
+            return Err(ShopError::ParentNotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
+    fn parent_states_snapshot(&self) -> Result<Vec<(String, ParentState)>> {
+        let state = self.store.load()?;
+        Ok(state
+            .parents
+            .iter()
+            .map(|(id, p)| (id.clone(), p.state))
+            .collect())
+    }
+
+    fn assert_wait_did_not_promote(&self, before: &[(String, ParentState)]) -> Result<()> {
+        let after = self.store.load()?;
+        for (id, was) in before {
+            let Some(now) = after.parents.get(id) else {
+                continue;
+            };
+            if now.state != *was && matches!(now.state, ParentState::Verified | ParentState::Closed)
+            {
+                return Err(ShopError::Wait(format!(
+                    "wait must not promote {id} from {was} to {}",
+                    now.state
+                )));
+            }
+            if now.state != *was {
+                return Err(ShopError::Wait(format!(
+                    "wait must not change parent {id} state ({was} -> {})",
+                    now.state
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub fn observe_mailbox(&self) -> MailboxObservation {
         observe(self.mailbox.as_deref(), &self.store.outbox_dir())
     }
@@ -1138,10 +1273,12 @@ impl Shop {
                 waits.push(format!("WAIT: verify {} not PASS", p.id));
             }
         }
+        let mut ledger = procwait::load_ledger(self.store.root())?;
+        ledger.refresh_liveness();
         let workers: Vec<WorkerView> = roster
             .workers
             .into_iter()
-            .map(|w| WorkerView::from_worker(w, &parents, &mailbox))
+            .map(|w| WorkerView::from_worker(w, &parents, &mailbox, &ledger.processes))
             .collect();
         let mut events = self.store.load_events();
         events.reverse();
@@ -1190,8 +1327,12 @@ impl Shop {
             out.push_str("  (none; add via shop ui)\n");
         } else {
             for w in &a.workers {
+                let pid = match (w.pid, w.pid_liveness) {
+                    (Some(pid), Some(live)) => format!("  pid={pid}  liveness={live}"),
+                    _ => String::new(),
+                };
                 out.push_str(&format!(
-                    "  {}  name={}  backend={}  model={}  github_skills={}  action={}\n",
+                    "  {}  name={}  backend={}  model={}  github_skills={}  action={}{pid}\n",
                     w.peer,
                     w.name,
                     w.intelligence.backend,
@@ -1200,6 +1341,21 @@ impl Shop {
                     w.action
                 ));
             }
+        }
+        out.push_str("PROCESSES\n");
+        match self.procwait() {
+            Ok(ledger) if ledger.processes.is_empty() => out.push_str("  (none)\n"),
+            Ok(ledger) => {
+                for p in &ledger.processes {
+                    out.push_str(&format!(
+                        "  pid={}  {}  pill={}\n",
+                        p.pid,
+                        p.liveness,
+                        p.status_pill()
+                    ));
+                }
+            }
+            Err(_) => out.push_str("  (none)\n"),
         }
         out.push_str("PARENTS\n");
         if a.parents.is_empty() {

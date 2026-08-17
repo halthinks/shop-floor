@@ -21,6 +21,8 @@ pub fn event_title(op: &str) -> &'static str {
         "merge_blocked" => "merge blocked",
         "merge" => "merge allowed",
         "close" => "close",
+        "wait" => "wait",
+        "stop" => "stop",
         _ => "event",
     }
 }
@@ -42,7 +44,7 @@ pub fn title_of(event: &Value) -> String {
 pub fn detail_of(event: &Value) -> String {
     let mut parts = Vec::new();
     for key in [
-        "peer", "parent", "child", "repo", "backend", "status", "reason",
+        "peer", "parent", "child", "repo", "backend", "status", "reason", "class",
     ] {
         if let Some(v) = event.get(key).and_then(|v| v.as_str()) {
             if !v.is_empty() {
@@ -52,6 +54,9 @@ pub fn detail_of(event: &Value) -> String {
     }
     if let Some(n) = event.get("count").and_then(|v| v.as_u64()) {
         parts.push(format!("count={n}"));
+    }
+    if let Some(n) = event.get("pid").and_then(|v| v.as_u64()) {
+        parts.push(format!("pid={n}"));
     }
     if let Some(note) = event.get("note").and_then(|v| v.as_str()) {
         if parts.is_empty() && !note.is_empty() {
