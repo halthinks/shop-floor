@@ -74,7 +74,7 @@ fn handoff_without_status_refuses_accept_and_does_not_invent_pass() {
     assert_eq!(shop.join("P").unwrap(), ParentState::InFlight);
     assert!(matches!(
         shop.close("P").unwrap_err(),
-        ShopError::CannotClose(_)
+        ShopError::ObligationOpen(_)
     ));
 }
 
@@ -137,7 +137,7 @@ fn assigned_child_blocks_join_verify_and_close() {
     ));
     assert!(matches!(
         shop.close("P").unwrap_err(),
-        ShopError::CannotClose(_)
+        ShopError::ObligationOpen(_)
     ));
 
     // Tamper: parent marked VERIFIED while the child is still ASSIGNED.
