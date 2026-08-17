@@ -4,7 +4,9 @@
 //! An unread assign is HOLD, not PASS. A mailbox handoff is Evidence and
 //! cannot CLOSE. GitHub counts stay null when the list is WAIT — never invent
 //! a zero. A boss view file is Evidence of what the floor said now; a picture
-//! cannot VERIFY. This file never writes `C:\TextPCB Platform`.
+//! cannot VERIFY. GrokBot is a permanent steerable node on the work graph.
+//! A missing `grokbot-role.json` is role=orchestrator (WAIT-safe), never an
+//! error PASS, never VERIFIED. This file never writes `C:\TextPCB Platform`.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -218,6 +220,21 @@ fn route(app: &Mutex<Shop>, method: &str, path: &str, body: &str) -> (String, St
             let shop = app.lock().unwrap_or_else(|e| e.into_inner());
             json_ok(json!({"events": shop.events()}))
         }
+        ("GET", "/api/graph") => {
+            let shop = app.lock().unwrap_or_else(|e| e.into_inner());
+            json_ok(graph_payload(&shop))
+        }
+        ("GET", "/api/grokbot") => {
+            let shop = app.lock().unwrap_or_else(|e| e.into_inner());
+            json_ok(grokbot_payload(&shop))
+        }
+        ("POST", "/api/grokbot") => {
+            let shop = app.lock().unwrap_or_else(|e| e.into_inner());
+            match post_grokbot(&shop, body) {
+                Ok(v) => json_ok(v),
+                Err(e) => json_err(&e),
+            }
+        }
         ("GET", "/api/project") => {
             let shop = app.lock().unwrap_or_else(|e| e.into_inner());
             json_ok(project_json(&shop))
@@ -298,6 +315,269 @@ fn route(app: &Mutex<Shop>, method: &str, path: &str, body: &str) -> (String, St
             b"not found".to_vec(),
         ),
     }
+}
+
+const GROKBOT_PEER: &str = "grok-bot";
+const GROKBOT_LABEL: &str = "GrokBot";
+const GROKBOT_FILE: &str = "grokbot-role.json";
+const GROKBOT_DEFAULT_ROLE: &str = "orchestrator";
+const GROKBOT_ROLES: &[&str] = &[
+    "orchestrator",
+    "captain",
+    "research",
+    "impl",
+    "builder",
+    "qa",
+    "lander",
+];
+const GROKBOT_STEER_CAP: usize = 50;
+
+#[derive(Clone)]
+struct GrokBotState {
+    role: String,
+    steers: Vec<Value>,
+    last_steer: Option<String>,
+    wait: Option<String>,
+}
+
+fn grokbot_roles_json() -> Value {
+    json!(GROKBOT_ROLES)
+}
+
+fn normalize_grokbot_role(raw: &str) -> Option<&'static str> {
+    let t = raw.trim();
+    if t.eq_ignore_ascii_case("verified") {
+        return None;
+    }
+    GROKBOT_ROLES.iter().copied().find(|r| *r == t)
+}
+
+fn default_grokbot() -> GrokBotState {
+    GrokBotState {
+        role: GROKBOT_DEFAULT_ROLE.to_string(),
+        steers: Vec::new(),
+        last_steer: None,
+        wait: None,
+    }
+}
+
+fn grokbot_path(shop: &Shop) -> PathBuf {
+    shop.store_root().join(GROKBOT_FILE)
+}
+
+fn load_grokbot(shop: &Shop) -> GrokBotState {
+    let path = grokbot_path(shop);
+    if !path.is_file() {
+        // Missing file is orchestrator. Not an error. Not PASS. Not VERIFIED.
+        return default_grokbot();
+    }
+    match fs::read_to_string(&path) {
+        Ok(raw) => match serde_json::from_str::<Value>(&raw) {
+            Ok(v) if v.is_object() => parse_grokbot_file(&v),
+            Ok(_) => {
+                let mut s = default_grokbot();
+                s.wait = Some("WAIT: grokbot-role.json is not an object".into());
+                s
+            }
+            Err(e) => {
+                let mut s = default_grokbot();
+                s.wait = Some(format!("WAIT: grokbot-role.json unreadable: {e}"));
+                s
+            }
+        },
+        Err(e) => {
+            let mut s = default_grokbot();
+            s.wait = Some(format!("WAIT: grokbot-role.json unreadable: {e}"));
+            s
+        }
+    }
+}
+
+fn parse_grokbot_file(v: &Value) -> GrokBotState {
+    let role = v
+        .get("role")
+        .and_then(|x| x.as_str())
+        .and_then(normalize_grokbot_role)
+        .unwrap_or(GROKBOT_DEFAULT_ROLE)
+        .to_string();
+    let steers = v
+        .get("steers")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let last = v
+        .get("steer")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            steers.last().and_then(|s| {
+                s.get("text")
+                    .and_then(|t| t.as_str())
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(ToString::to_string)
+            })
+        });
+    GrokBotState {
+        role,
+        steers,
+        last_steer: last,
+        wait: None,
+    }
+}
+
+fn save_grokbot(shop: &Shop, state: &GrokBotState) -> Result<()> {
+    let path = grokbot_path(shop);
+    crate::store::ensure_under(&path, &[shop.store_root().to_path_buf()])?;
+    let v = json!({
+        "peer": GROKBOT_PEER,
+        "role": state.role,
+        "steer": state.last_steer,
+        "steers": state.steers,
+    });
+    crate::store::write_json_atomic(&path, &v)
+}
+
+fn grokbot_json(state: &GrokBotState) -> Value {
+    let mut v = json!({
+        "peer": GROKBOT_PEER,
+        "role": state.role,
+        "roles": grokbot_roles_json(),
+        "steers": state.steers,
+    });
+    if let Some(obj) = v.as_object_mut() {
+        if let Some(w) = &state.wait {
+            obj.insert("wait".into(), json!(w));
+        }
+        obj.remove("VERIFIED");
+        obj.remove("verified");
+    }
+    v
+}
+
+fn grokbot_payload(shop: &Shop) -> Value {
+    grokbot_json(&load_grokbot(shop))
+}
+
+fn post_grokbot(shop: &Shop, body: &str) -> Result<Value> {
+    let f = form(body);
+    let mut state = load_grokbot(shop);
+    state.wait = None;
+    let mut changed = false;
+    if let Some(role) = f.get("role") {
+        let Some(ok) = normalize_grokbot_role(role) else {
+            return Err(ShopError::IncompleteEvidence(format!(
+                "unknown grokbot role '{role}'"
+            )));
+        };
+        state.role = ok.to_string();
+        changed = true;
+    }
+    if let Some(steer) = f.get("steer") {
+        let text = steer.trim();
+        if text.is_empty() {
+            return Err(ShopError::IncompleteEvidence("empty steer".into()));
+        }
+        state.last_steer = Some(text.to_string());
+        state.steers.push(json!({
+            "text": text,
+            "at": crate::hash::format_rfc3339(crate::hash::unix_now()),
+            "role": state.role,
+        }));
+        if state.steers.len() > GROKBOT_STEER_CAP {
+            let drop = state.steers.len() - GROKBOT_STEER_CAP;
+            state.steers.drain(0..drop);
+        }
+        changed = true;
+    }
+    if !changed {
+        return Err(ShopError::IncompleteEvidence(
+            "POST /api/grokbot needs role or steer".into(),
+        ));
+    }
+    save_grokbot(shop, &state)?;
+    Ok(grokbot_json(&state))
+}
+
+fn steer_target_id(shop: &Shop) -> String {
+    match shop.workers() {
+        Ok(roster) if roster.workers.iter().any(|w| w.peer == "kimi-code") => "kimi-code".into(),
+        _ => "captain".into(),
+    }
+}
+
+fn graph_payload(shop: &Shop) -> Value {
+    let gb = load_grokbot(shop);
+    let target = steer_target_id(shop);
+    let roster = shop.workers().ok();
+    let workers = roster.as_ref().map(|r| r.workers.as_slice()).unwrap_or(&[]);
+    let target_label = workers
+        .iter()
+        .find(|w| w.peer == target)
+        .map(|w| w.name.clone())
+        .unwrap_or_else(|| {
+            if target == "kimi-code" {
+                "kimi-code".into()
+            } else {
+                "Captain".into()
+            }
+        });
+    let mut nodes = vec![
+        json!({
+            "id": GROKBOT_PEER,
+            "label": GROKBOT_LABEL,
+            "role": gb.role,
+            "steerable": true,
+            "kind": "grokbot",
+        }),
+        json!({
+            "id": target,
+            "label": target_label,
+            "kind": "peer",
+            "steerable": false,
+        }),
+    ];
+    for w in workers {
+        if w.peer == GROKBOT_PEER || w.peer == target {
+            continue;
+        }
+        nodes.push(json!({
+            "id": w.peer,
+            "label": w.name,
+            "kind": "worker",
+            "backend": w.intelligence.backend.as_str(),
+            "steerable": false,
+        }));
+    }
+    if let Ok(jobs) = local_live_jobs(shop) {
+        for job in jobs {
+            let id = format!("job:{}:{}", job.parent_id, job.child_id);
+            nodes.push(json!({
+                "id": id,
+                "label": format!("{}/{}", job.parent_id, job.child_id),
+                "kind": "job",
+                "peer": job.peer,
+                "action": job.action,
+                "steerable": false,
+            }));
+        }
+    }
+    let mut graph = json!({
+        "nodes": nodes,
+        "edges": [{
+            "from": GROKBOT_PEER,
+            "to": target,
+            "kind": "steer",
+        }],
+    });
+    if let Some(w) = gb.wait {
+        if let Some(obj) = graph.as_object_mut() {
+            obj.insert("wait".into(), json!(w));
+        }
+    }
+    graph
 }
 
 fn workers_json(shop: &Shop) -> Value {
@@ -829,5 +1109,197 @@ pub fn ensure_store(dir: PathBuf) -> Result<Shop> {
     match Shop::open_store(&dir) {
         Ok(s) => Ok(s),
         Err(_) => Shop::init(dir),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    fn tmp_store() -> PathBuf {
+        let n = SEQ.fetch_add(1, Ordering::SeqCst);
+        let p = std::env::temp_dir().join(format!("shop-ui-grokbot-{}-{n}", std::process::id()));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn http(addr: &str, method: &str, path: &str, body: &str) -> String {
+        let mut last = String::new();
+        for _ in 0..40 {
+            if let Ok(mut s) = TcpStream::connect(addr) {
+                let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut req =
+                    format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
+                if !body.is_empty() {
+                    req.push_str("Content-Type: application/json\r\n");
+                    req.push_str(&format!("Content-Length: {}\r\n", body.len()));
+                }
+                req.push_str("\r\n");
+                req.push_str(body);
+                if s.write_all(req.as_bytes()).is_ok() {
+                    let mut buf = Vec::new();
+                    let _ = s.read_to_end(&mut buf);
+                    last = String::from_utf8_lossy(&buf).into_owned();
+                    if last.starts_with("HTTP/1.1 200") || last.starts_with("HTTP/1.1 400") {
+                        return last;
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        last
+    }
+
+    fn json_body(resp: &str) -> Value {
+        let body = resp.split("\r\n\r\n").nth(1).unwrap_or(resp);
+        serde_json::from_str(body).unwrap_or_else(|_| json!({"raw": body}))
+    }
+
+    fn spawn_shop(shop: Shop) -> String {
+        let (addr, _h) = spawn(shop, 0).unwrap();
+        std::mem::forget(_h);
+        format!("{}:{}", addr.ip(), addr.port())
+    }
+
+    #[test]
+    fn missing_role_file_is_orchestrator_not_error() {
+        let dir = tmp_store();
+        let shop = Shop::init(&dir).unwrap();
+        assert!(!grokbot_path(&shop).is_file());
+        let host = spawn_shop(shop);
+        let resp = http(&host, "GET", "/api/grokbot", "");
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+        let v = json_body(&resp);
+        assert_eq!(v["peer"], GROKBOT_PEER);
+        assert_eq!(v["role"], GROKBOT_DEFAULT_ROLE);
+        assert!(v.get("error").is_none(), "{v}");
+        assert_ne!(v["role"], "VERIFIED");
+        let roles = v["roles"].as_array().expect("roles");
+        for want in GROKBOT_ROLES {
+            assert!(
+                roles.iter().any(|r| r == *want),
+                "missing role {want} in {roles:?}"
+            );
+        }
+        assert_eq!(v["steers"].as_array().map(|a| a.len()).unwrap_or(99), 0);
+    }
+
+    #[test]
+    fn post_role_and_steer_persist_on_disk() {
+        let dir = tmp_store();
+        let shop = Shop::init(&dir).unwrap();
+        let store = shop.store_root().to_path_buf();
+        let host = spawn_shop(shop);
+        let role_resp = http(&host, "POST", "/api/grokbot", r#"{"role":"research"}"#);
+        assert!(role_resp.starts_with("HTTP/1.1 200"), "{role_resp}");
+        let role_v = json_body(&role_resp);
+        assert_eq!(role_v["role"], "research");
+
+        let steer_resp = http(
+            &host,
+            "POST",
+            "/api/grokbot",
+            r#"{"steer":"look at the floor"}"#,
+        );
+        assert!(steer_resp.starts_with("HTTP/1.1 200"), "{steer_resp}");
+        let steer_v = json_body(&steer_resp);
+        assert_eq!(steer_v["role"], "research");
+        let steers = steer_v["steers"].as_array().expect("steers");
+        assert_eq!(steers.len(), 1);
+        assert_eq!(steers[0]["text"], "look at the floor");
+
+        let disk = fs::read_to_string(store.join(GROKBOT_FILE)).unwrap();
+        let saved: Value = serde_json::from_str(&disk).unwrap();
+        assert_eq!(saved["role"], "research");
+        assert_eq!(saved["steer"], "look at the floor");
+        assert_ne!(saved["role"], "VERIFIED");
+
+        let get = json_body(&http(&host, "GET", "/api/grokbot", ""));
+        assert_eq!(get["role"], "research");
+        assert_eq!(get["steers"][0]["text"], "look at the floor");
+    }
+
+    #[test]
+    fn graph_includes_steerable_grokbot_and_steer_edge() {
+        let dir = tmp_store();
+        let shop = Shop::init(&dir).unwrap();
+        let host = spawn_shop(shop);
+        let resp = http(&host, "GET", "/api/graph", "");
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+        let v = json_body(&resp);
+        let nodes = v["nodes"].as_array().expect("nodes");
+        let grok = nodes
+            .iter()
+            .find(|n| n["id"] == GROKBOT_PEER)
+            .expect("grok-bot node");
+        assert_eq!(grok["label"], GROKBOT_LABEL);
+        assert_eq!(grok["role"], GROKBOT_DEFAULT_ROLE);
+        assert_eq!(grok["steerable"], true);
+        let edges = v["edges"].as_array().expect("edges");
+        assert!(
+            edges.iter().any(|e| {
+                e["from"] == GROKBOT_PEER && e["to"] == "captain" && e["kind"] == "steer"
+            }),
+            "missing grok-bot -> captain steer edge: {edges:?}"
+        );
+        assert!(nodes.iter().any(|n| n["id"] == "captain"));
+    }
+
+    #[test]
+    fn graph_steers_kimi_code_when_that_id_exists() {
+        let dir = tmp_store();
+        let mut shop = Shop::init(&dir).unwrap();
+        shop.add_worker("kimi-code", "Kimi", "cursor", "", true)
+            .unwrap();
+        let host = spawn_shop(shop);
+        let v = json_body(&http(&host, "GET", "/api/graph", ""));
+        let edges = v["edges"].as_array().expect("edges");
+        assert!(
+            edges.iter().any(|e| {
+                e["from"] == GROKBOT_PEER && e["to"] == "kimi-code" && e["kind"] == "steer"
+            }),
+            "missing grok-bot -> kimi-code steer edge: {edges:?}"
+        );
+        assert!(v["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == "kimi-code"));
+        assert!(!v["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == "captain"));
+    }
+
+    #[test]
+    fn unknown_role_is_wait_not_verified() {
+        let dir = tmp_store();
+        let shop = Shop::init(&dir).unwrap();
+        let host = spawn_shop(shop);
+        let resp = http(&host, "POST", "/api/grokbot", r#"{"role":"VERIFIED"}"#);
+        assert!(resp.starts_with("HTTP/1.1 400"), "{resp}");
+        let v = json_body(&resp);
+        assert!(v.get("error").is_some(), "{v}");
+        let get = json_body(&http(&host, "GET", "/api/grokbot", ""));
+        assert_eq!(get["role"], GROKBOT_DEFAULT_ROLE);
+        assert_ne!(get["role"], "VERIFIED");
+    }
+
+    #[test]
+    fn page_embeds_grokbot_on_the_graph() {
+        assert!(PAGE.contains("id=\"work-graph\""));
+        assert!(PAGE.contains("id=\"grok-bot\"") || PAGE.contains("grok-bot"));
+        assert!(PAGE.contains("GrokBot"));
+        assert!(PAGE.contains("id=\"grokbot-dock\""));
+        assert!(PAGE.contains("id=\"grokbot-steer\"") || PAGE.contains("Steer"));
+        assert!(CSS.contains("#work-graph") || CSS.contains("work-graph"));
     }
 }

@@ -46,6 +46,39 @@
     </div>
   </div>
 
+  <section id="work-graph" class="grokbot-on" aria-label="Work graph">
+    <div class="graph-main">
+      <div class="label">Work graph</div>
+      <h2>Work graph</h2>
+      <p class="help">GrokBot is on this graph. Click it to change role and steer.</p>
+      <div id="graph-nodes">
+        <div class="graph-node-row">
+          <button type="button" class="graph-node steerable selected" data-id="grok-bot" id="grok-bot" aria-pressed="true">GrokBot</button>
+        </div>
+      </div>
+    </div>
+    <aside id="grokbot-dock">
+      <div class="label">GrokBot</div>
+      <h2>GrokBot</h2>
+      <p class="help">Role and last steer stay on disk. Missing file is orchestrator.</p>
+      <div id="grokbot-role-chips">
+        <button type="button" class="role-chip on" data-role="orchestrator">orchestrator</button>
+        <button type="button" class="role-chip" data-role="captain">captain</button>
+        <button type="button" class="role-chip" data-role="research">research</button>
+        <button type="button" class="role-chip" data-role="impl">impl</button>
+        <button type="button" class="role-chip" data-role="builder">builder</button>
+        <button type="button" class="role-chip" data-role="qa">qa</button>
+        <button type="button" class="role-chip" data-role="lander">lander</button>
+      </div>
+      <form id="grokbot-steer-form">
+        <label class="sr" for="grokbot-steer-input">Steer GrokBot</label>
+        <textarea id="grokbot-steer-input" name="steer" rows="2" autocomplete="off" placeholder="Steer GrokBot…"></textarea>
+        <button type="submit" id="grokbot-steer">Steer</button>
+      </form>
+      <div id="grokbot-steers"></div>
+    </aside>
+  </section>
+
   <div id="stage">
     <section id="workers">
       <div class="label">Workers</div>
@@ -298,6 +331,69 @@ function timeOf(ev){
 }
 
 let selectedPull = null;
+let selectedGraphId = 'grok-bot';
+const GROKBOT_ROLES = ['orchestrator','captain','research','impl','builder','qa','lander'];
+
+function setGrokbotDock(on){
+  const dock = document.getElementById('grokbot-dock');
+  dock.hidden = !on;
+  dock.classList.toggle('on', on);
+  document.getElementById('work-graph').classList.toggle('grokbot-on', on);
+}
+
+function renderGraph(g){
+  const box = document.getElementById('graph-nodes');
+  const nodes = Array.isArray(g && g.nodes) ? g.nodes : [];
+  const edges = Array.isArray(g && g.edges) ? g.edges : [];
+  if (!nodes.length) {
+    box.innerHTML = '<div class="quiet">Waiting — graph not written</div>';
+    return;
+  }
+  const edgeHtml = edges.map(e => {
+    const kind = esc(e.kind || 'edge');
+    return `<div class="graph-edge" data-kind="${kind}"><span class="graph-from">${esc(e.from)}</span><span class="graph-kind">${kind}</span><span class="graph-to">${esc(e.to)}</span></div>`;
+  }).join('');
+  const nodeHtml = nodes.map(n => {
+    const id = String(n.id || '');
+    const selected = id === selectedGraphId ? ' selected' : '';
+    const steerable = n.steerable ? ' steerable' : '';
+    const role = n.role ? `<span class="quiet">${esc(n.role)}</span>` : '';
+    const nid = id === 'grok-bot' ? ' id="grok-bot"' : '';
+    return `<button type="button" class="graph-node${steerable}${selected}" data-id="${esc(id)}"${nid} aria-pressed="${id===selectedGraphId?'true':'false'}">${esc(n.label || id)} ${role}</button>`;
+  }).join('');
+  const wait = g.wait ? '<div class="quiet">'+esc(waitWords(g.wait))+'</div>' : '';
+  box.innerHTML = wait + '<div class="graph-edges">'+edgeHtml+'</div><div class="graph-node-row">'+nodeHtml+'</div>';
+}
+
+function renderGrokbot(gb){
+  const roles = Array.isArray(gb && gb.roles) && gb.roles.length ? gb.roles : GROKBOT_ROLES;
+  const role = String((gb && gb.role) || 'orchestrator');
+  const chips = document.getElementById('grokbot-role-chips');
+  chips.innerHTML = roles.map(r => {
+    const on = r === role ? ' on' : '';
+    return `<button type="button" class="role-chip${on}" data-role="${esc(r)}">${esc(r)}</button>`;
+  }).join('');
+  const steers = Array.isArray(gb && gb.steers) ? gb.steers : [];
+  const last = steers.length ? steers[steers.length-1] : null;
+  const el = document.getElementById('grokbot-steers');
+  if (!last) {
+    el.innerHTML = '<div class="quiet">No steer yet</div>';
+    return;
+  }
+  el.innerHTML = '<div class="quiet">Last steer · '+esc(last.role || role)+'</div><div class="grokbot-last">'+esc(last.text || '')+'</div>';
+}
+
+async function refreshGraph(){
+  const g = await j('/api/graph');
+  renderGraph(g);
+  const hasGrok = Array.isArray(g.nodes) && g.nodes.some(n => n.id === 'grok-bot');
+  if (!hasGrok) selectedGraphId = selectedGraphId === 'grok-bot' ? '' : selectedGraphId;
+  setGrokbotDock(selectedGraphId === 'grok-bot');
+  if (selectedGraphId === 'grok-bot') {
+    const gb = await j('/api/grokbot');
+    renderGrokbot(gb);
+  }
+}
 
 async function refresh(){
   let st;
@@ -383,6 +479,7 @@ async function refresh(){
   refreshMemory();
   refreshBoss();
   refreshProject();
+  refreshGraph();
 }
 
 async function refreshGithub(){
@@ -648,6 +745,35 @@ document.getElementById('github-repo-list').addEventListener('click', async (e) 
   await j('/api/project/open', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ kind: 'github', repo: b.getAttribute('data-repo') }) });
   document.getElementById('project-palette').hidden = true;
   refresh();
+});
+document.getElementById('graph-nodes').addEventListener('click', (e) => {
+  const node = e.target.closest('.graph-node');
+  if (!node) return;
+  selectedGraphId = node.getAttribute('data-id') || '';
+  refreshGraph();
+});
+document.getElementById('grokbot-role-chips').addEventListener('click', async (e) => {
+  const chip = e.target.closest('[data-role]');
+  if (!chip) return;
+  await j('/api/grokbot', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ role: chip.getAttribute('data-role') }) });
+  refreshGraph();
+});
+document.getElementById('grokbot-steer-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const input = document.getElementById('grokbot-steer-input');
+  const steer = input.value.trim();
+  if (!steer) return;
+  await j('/api/grokbot', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ steer }) });
+  input.value = '';
+  refreshGraph();
+});
+document.getElementById('grokbot-steer-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    document.getElementById('grokbot-steer-form').requestSubmit();
+  }
 });
 document.getElementById('github-connect-picker').addEventListener('submit', async (e) => {
   e.preventDefault();
