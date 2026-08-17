@@ -302,7 +302,10 @@ fn ui_serves_command_center_structure() {
     assert!(PAGE.contains("id=\"github\""));
     assert!(PAGE.contains("id=\"mailbox\""));
     assert!(PAGE.contains("id=\"add-worker\""));
+    assert!(PAGE.contains("Cursor Ultra model id"));
     assert!(PAGE.contains("id=\"intelligence-backend\""));
+    assert!(PAGE.contains("Cursor Ultra") || PAGE.contains("cursor-ultra"));
+    assert!(PAGE.contains("Cursor Ultra model id") || PAGE.contains("intelligence-model"));
     assert!(PAGE.contains("Workers"));
     assert!(PAGE.contains("Current job"));
     assert!(PAGE.contains("GitHub"));
@@ -353,20 +356,54 @@ fn ui_serves_command_center_structure() {
 
 #[test]
 fn seeded_workers_are_on_the_roster() {
-    let (shop, _dir) = fresh();
-    let peers: Vec<String> = shop
-        .workers()
-        .unwrap()
-        .workers
-        .into_iter()
-        .map(|w| w.peer)
-        .collect();
-    for need in ["cursor", "grok-ultra", "grok-bot", "cursor-groksuperheavy"] {
-        assert!(
-            peers.iter().any(|p| p == need),
-            "missing seeded worker {need}"
-        );
-    }
+    let (shop, dir) = fresh();
+    let workers = shop.workers().unwrap().workers;
+    let find = |peer: &str| {
+        workers
+            .iter()
+            .find(|w| w.peer == peer)
+            .unwrap_or_else(|| panic!("missing seeded worker {peer}"))
+    };
+    let cursor = find("cursor");
+    assert_eq!(cursor.name, "Cursor");
+    assert_eq!(cursor.intelligence.backend.as_str(), "cursor");
+    assert!(cursor.github_skills);
+
+    let grok_ultra = find("grok-ultra");
+    assert_eq!(grok_ultra.name, "Grok (Cursor Ultra)");
+    assert_eq!(grok_ultra.intelligence.backend.as_str(), "cursor-ultra");
+    assert_eq!(grok_ultra.intelligence.model, "grok");
+    assert!(grok_ultra.github_skills);
+
+    let grok_bot = find("grok-bot");
+    assert_eq!(grok_bot.name, "Orchestrator / Grok Bot");
+    assert_eq!(grok_bot.intelligence.backend.as_str(), "grok-bot");
+    assert!(grok_bot.github_skills);
+
+    let boss = find("cursor-groksuperheavy");
+    assert_eq!(boss.name, "SuperGrokHeavy");
+    assert_eq!(boss.intelligence.backend.as_str(), "grok-build");
+    assert!(boss.github_skills);
+
+    assert_eq!(
+        shop.github_repo().unwrap().unwrap().slug(),
+        "halthinks/shop-floor"
+    );
+    assert!(shop.state().unwrap().parents.is_empty());
+    assert!(shop.state().unwrap().claims.is_empty());
+    let outbox = dir.join("outbox");
+    let assign_files = fs::read_dir(&outbox)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with("assign-")
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(assign_files, 0, "seed must not write assigns until shop split");
 }
 
 #[test]

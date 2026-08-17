@@ -75,7 +75,10 @@ pub struct MailboxObservation {
     pub outbox_count: usize,
 }
 
-/// `--mailbox` > `SHOP_MAILBOX` > `{store}/mailbox`
+/// Windows mailbox default when `SHOP_MAILBOX` is unset. Not Platform.
+pub const WINDOWS_MAILBOX_DEFAULT: &str = r"C:\Users\jetga\.textpcb-agent-bridge";
+
+/// `--mailbox` > `SHOP_MAILBOX` > Windows default > `{store}/mailbox` (tests/linux)
 pub fn resolve_mailbox(explicit: Option<PathBuf>, store_root: &Path) -> PathBuf {
     if let Some(p) = explicit {
         return p;
@@ -86,6 +89,15 @@ pub fn resolve_mailbox(explicit: Option<PathBuf>, store_root: &Path) -> PathBuf 
             return PathBuf::from(t);
         }
     }
+    #[cfg(windows)]
+    {
+        let win = PathBuf::from(WINDOWS_MAILBOX_DEFAULT);
+        if crate::project::is_forbidden_project(&win) {
+            return store_root.join("mailbox");
+        }
+        return win;
+    }
+    #[cfg(not(windows))]
     store_root.join("mailbox")
 }
 
@@ -337,5 +349,22 @@ mod tests {
         assert_eq!(v["claim_ceiling"], CLAIM_CEILING);
         assert!(v.get("pcb").is_none());
         assert!(v.get("cad").is_none());
+    }
+
+    #[test]
+    fn resolve_mailbox_prefers_explicit_then_store_on_linux() {
+        assert_eq!(
+            WINDOWS_MAILBOX_DEFAULT,
+            r"C:\Users\jetga\.textpcb-agent-bridge"
+        );
+        assert!(!WINDOWS_MAILBOX_DEFAULT.contains("TextPCB Platform"));
+        let store = PathBuf::from("/tmp/shop-store-mb");
+        let explicit = resolve_mailbox(Some(PathBuf::from("/tmp/bridge")), &store);
+        assert_eq!(explicit, PathBuf::from("/tmp/bridge"));
+        #[cfg(not(windows))]
+        {
+            let fallback = resolve_mailbox(Some(store.join("mailbox")), &store);
+            assert_eq!(fallback, store.join("mailbox"));
+        }
     }
 }

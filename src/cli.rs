@@ -58,6 +58,8 @@ pub enum Commands {
         #[arg(long)]
         name: Option<String>,
         #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
         backend: String,
         #[arg(long)]
         model: Option<String>,
@@ -268,15 +270,17 @@ fn dispatch(shop: &mut Shop, command: Commands) -> Result<()> {
         Commands::Add {
             peer,
             name,
+            title,
             backend,
             model,
             github_skills,
             no_github_skills,
         } => {
             let skills = github_skills && !no_github_skills;
+            let shown = title.as_deref().or(name.as_deref()).unwrap_or(&peer);
             let w = shop.add_worker(
                 &peer,
-                name.as_deref().unwrap_or(&peer),
+                shown,
                 &backend,
                 model.as_deref().unwrap_or(""),
                 skills,

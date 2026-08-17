@@ -63,7 +63,7 @@
             <option value="grok-build">SuperGrokHeavy</option>
           </select>
         </label>
-        <label class="sr">Model <input id="intelligence-model" name="model" placeholder="model id" autocomplete="off"></label>
+        <label class="sr">Model <input id="intelligence-model" name="model" placeholder="Cursor Ultra model id" autocomplete="off"></label>
         <label class="skills-toggle"><input type="checkbox" name="github_skills" value="1" checked> GitHub skills</label>
         <button type="submit">Add worker</button>
       </form>
@@ -290,12 +290,12 @@ async function refresh(){
     const skills = w.github_skills !== false;
     const reason = action === 'idle' ? '' : esc((w.action_reason || '').split(/\s+/).slice(0,8).join(' '));
     return `<div class="worker-line">
-      <span class="peer">${esc(w.peer)}</span>
+      <span class="peer">${esc(w.name || w.peer)} <span class="quiet">${esc(w.peer)}</span></span>
       <form class="intel" action="/workers/${encodeURIComponent(w.peer)}/intelligence" method="post">
         <label class="sr">AI
           <select name="backend" aria-label="AI">${BACKENDS.map(b => `<option value="${b}" ${intel.backend===b?'selected':''}>${aiWords(b)}</option>`).join('')}</select>
         </label>
-        <label class="sr">Model <input name="model" value="${esc(intel.model||'')}" placeholder="model id"></label>
+        <label class="sr">Model <input name="model" value="${esc(intel.model||'')}" placeholder="Cursor Ultra model id"></label>
       </form>
       <form class="skills" action="/workers/${encodeURIComponent(w.peer)}/github-skills" method="post">
         <label><input type="checkbox" name="enabled" value="1" ${skills?'checked':''}> GitHub skills</label>

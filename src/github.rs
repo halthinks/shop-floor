@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, ShopError};
 
+/// Shop's own public repo. Recorded on first init. Not a clone, not a lane.
+pub const DEFAULT_REPO: &str = "halthinks/shop-floor";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitHubRepo {
     pub owner: String,

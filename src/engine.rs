@@ -66,6 +66,7 @@ impl Shop {
         let store = Store::init(store)?;
         let mut shop = Self::from_store(store);
         shop.ensure_seeded_workers()?;
+        shop.ensure_default_github()?;
         Ok(shop)
     }
 
@@ -73,6 +74,7 @@ impl Shop {
         let store = Store::open(store)?;
         let mut shop = Self::from_store(store);
         shop.ensure_seeded_workers()?;
+        shop.ensure_default_github()?;
         Ok(shop)
     }
 
@@ -149,9 +151,18 @@ impl Shop {
         if !self.store.load_workers()?.workers.is_empty() {
             return Ok(());
         }
-        for (peer, backend) in crate::workers::SEEDED_WORKERS {
-            self.add_worker(peer, peer, backend, "", true)?;
+        for seed in crate::workers::SEEDED_WORKERS {
+            self.add_worker(seed.peer, seed.title, seed.backend, seed.model, true)?;
         }
+        Ok(())
+    }
+
+    /// Record shop's own public repo. No clone, no lane, no Platform write.
+    fn ensure_default_github(&mut self) -> Result<()> {
+        if self.store.load_github()?.is_some() {
+            return Ok(());
+        }
+        self.github_connect(crate::github::DEFAULT_REPO, Some("main"), None)?;
         Ok(())
     }
 
@@ -380,6 +391,13 @@ impl Shop {
 
     fn github_verify_block(&self, parent: &Parent) -> Option<String> {
         let repo = self.store.load_github().ok().flatten()?;
+        // Default shop-floor record is a catalog pointer, not a PR claim.
+        if repo.slug() == crate::github::DEFAULT_REPO
+            && parent.github_pr_url.is_none()
+            && parent.github_pr_number.is_none()
+        {
+            return None;
+        }
         match parent.github_pr_url.as_ref() {
             None => Some(format!(
                 "WAIT: repo {} connected but no real PR; never fake VERIFIED",

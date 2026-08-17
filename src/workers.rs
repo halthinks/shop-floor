@@ -81,12 +81,41 @@ pub struct WorkerRoster {
     pub workers: Vec<Worker>,
 }
 
+/// One seeded roster row. Capacity only — not a job, not a lane.
+#[derive(Debug, Clone, Copy)]
+pub struct SeededWorker {
+    pub peer: &'static str,
+    pub backend: &'static str,
+    pub model: &'static str,
+    pub title: &'static str,
+}
+
 /// Floor roster shown on first init. Capacity only — not jobs, not lanes.
-pub const SEEDED_WORKERS: &[(&str, &str)] = &[
-    ("cursor", "cursor"),
-    ("grok-ultra", "grok-ultra"),
-    ("grok-bot", "grok-bot"),
-    ("cursor-groksuperheavy", "cursor"),
+pub const SEEDED_WORKERS: &[SeededWorker] = &[
+    SeededWorker {
+        peer: "cursor",
+        backend: "cursor",
+        model: "",
+        title: "Cursor",
+    },
+    SeededWorker {
+        peer: "grok-ultra",
+        backend: "cursor-ultra",
+        model: "grok",
+        title: "Grok (Cursor Ultra)",
+    },
+    SeededWorker {
+        peer: "grok-bot",
+        backend: "grok-bot",
+        model: "",
+        title: "Orchestrator / Grok Bot",
+    },
+    SeededWorker {
+        peer: "cursor-groksuperheavy",
+        backend: "grok-build",
+        model: "",
+        title: "SuperGrokHeavy",
+    },
 ];
 
 impl WorkerRoster {
