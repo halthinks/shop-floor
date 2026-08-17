@@ -1,0 +1,5 @@
+{
+  "$comment": "shop-floor .shop/run.json schema v1. backends.<backend> is a command template string or argv array. Tokens: {peer} {child} {parent} {worktree} {model}. SHOP_RUN_CMD overrides this file. Empty or missing template is INCONCLUSIVE and must not invent a PID. Shop does not invent Grok/Cursor CLI flags. Process start/exit is Evidence, not VERIFIED.",
+  "schema": 1,
+  "backends": {}
+}
