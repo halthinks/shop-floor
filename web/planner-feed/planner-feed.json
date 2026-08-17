@@ -1,0 +1,40 @@
+{
+  "updated_at": "2026-08-17T06:00:00Z",
+  "planner": "cursor-groksuperheavy",
+  "thoughts": [
+    {
+      "t": "2026-08-17T05:58:00Z",
+      "text": "EXAMPLE: poll SuperGrok mailbox for steer-reply / handoff / reply. Missing mail is WAIT, not a fake thought."
+    },
+    {
+      "t": "2026-08-17T05:59:00Z",
+      "text": "EXAMPLE: read the out log after mailbox. Seed rows are not shop metrics and not a live floor snapshot."
+    },
+    {
+      "t": "2026-08-17T06:00:00Z",
+      "text": "EXAMPLE: incomplete evidence stays WAIT. Do not invent TextPCB work or a PASS."
+    }
+  ],
+  "actions": [
+    {
+      "t": "2026-08-17T05:58:30Z",
+      "kind": "assign",
+      "text": "EXAMPLE: assign would write mailbox + outbox for a named child. No child invented here."
+    },
+    {
+      "t": "2026-08-17T05:59:10Z",
+      "kind": "handoff",
+      "text": "EXAMPLE: handoff is evidence from a child reply. No handoff file was read for this seed."
+    },
+    {
+      "t": "2026-08-17T05:59:40Z",
+      "kind": "status",
+      "text": "EXAMPLE: status would echo mailbox + out log only. No live parent or counts claimed."
+    },
+    {
+      "t": "2026-08-17T06:00:00Z",
+      "kind": "merge",
+      "text": "EXAMPLE: merge stays blocked until VERIFIED. Seed is not a merge grant."
+    }
+  ]
+}
