@@ -294,7 +294,7 @@ pub fn decide(facts: &PulseFacts) -> PulseDecision {
     }
 
     let unused = unused_groups(&facts.merged_prs);
-    let (leftover, leftover_hole) = name_leftover(&unused);
+    let (leftover, hole) = name_leftover(&unused);
     debug_assert!(
         leftover_name_allowed(&leftover, &unused),
         "leftover name cannot be empty while a reserved path is unused"
@@ -304,10 +304,34 @@ pub fn decide(facts: &PulseFacts) -> PulseDecision {
         return PulseDecision {
             kind: PulseKind::CloseWorkers,
             leftover,
-            leftover_hole,
+            leftover_hole: hole,
             pr: Some(pr.number),
             reason: format!(
                 "close invented workers.rs PR #{}; never merge that lane",
+                pr.number
+            ),
+        };
+    }
+
+    // Lander: a green reserved PR merges now. Do not wait for a chat.
+    if let Some(pr) = facts.open_prs.iter().find(|p| may_merge(p)) {
+        let idx = reserved_group_index(&pr.files).expect("may_merge requires one reserved group");
+        return PulseDecision {
+            kind: PulseKind::Merge,
+            leftover: if unused.contains(&idx) {
+                leftover_label(idx)
+            } else {
+                leftover
+            },
+            leftover_hole: if unused.contains(&idx) {
+                leftover_hole(idx).to_string()
+            } else {
+                hole
+            },
+            pr: Some(pr.number),
+            reason: format!(
+                "lander: reserved leftover {} is green; merge PR #{} without a chat",
+                leftover_label(idx),
                 pr.number
             ),
         };
@@ -318,21 +342,10 @@ pub fn decide(facts: &PulseFacts) -> PulseDecision {
             reserved_group_index(&p.files) == Some(idx) && !is_never_remmerge(p.number)
         });
         match open_for {
-            Some(pr) if may_merge(pr) => PulseDecision {
-                kind: PulseKind::Merge,
-                leftover: leftover_label(idx),
-                leftover_hole: leftover_hole.clone(),
-                pr: Some(pr.number),
-                reason: format!(
-                    "lander: reserved leftover {} is green; merge PR #{} without a chat",
-                    leftover_label(idx),
-                    pr.number
-                ),
-            },
             Some(pr) => PulseDecision {
                 kind: PulseKind::Wait,
                 leftover,
-                leftover_hole,
+                leftover_hole: hole,
                 pr: Some(pr.number),
                 reason: format!(
                     "WAIT: reserved PR #{}: {}",
@@ -343,7 +356,7 @@ pub fn decide(facts: &PulseFacts) -> PulseDecision {
             None => PulseDecision {
                 kind: PulseKind::WriteBrief,
                 leftover,
-                leftover_hole,
+                leftover_hole: hole,
                 pr: None,
                 reason: "no reserved PR open; name the next unused leftover".into(),
             },
@@ -352,7 +365,7 @@ pub fn decide(facts: &PulseFacts) -> PulseDecision {
         PulseDecision {
             kind: PulseKind::WriteBrief,
             leftover,
-            leftover_hole,
+            leftover_hole: hole,
             pr: None,
             reason: "all reserved leftovers have a green merged PR; do not invent a fifth product"
                 .into(),

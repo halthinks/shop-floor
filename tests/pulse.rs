@@ -258,6 +258,21 @@ fn write_brief_when_no_reserved_pr_open() {
 }
 
 #[test]
+fn green_reserved_pr_still_merges_after_path_already_used() {
+    let open = pr(25, &["src/cli.rs"], green_checks(), false);
+    assert!(may_merge(&open));
+    let facts = PulseFacts {
+        roadmap: roadmap(),
+        open_prs: vec![open],
+        merged_prs: landed_reserved(),
+    };
+    let d = decide(&facts);
+    assert_eq!(d.kind, PulseKind::Merge);
+    assert_eq!(d.pr, Some(25));
+    assert!(d.leftover.is_empty(), "do not invent a fifth leftover name");
+}
+
+#[test]
 fn live_suite_after_lib_land_does_not_invent_fifth() {
     let facts = PulseFacts {
         roadmap: roadmap(),

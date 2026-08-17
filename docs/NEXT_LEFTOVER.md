@@ -7,7 +7,7 @@ All reserved suite leftovers have a green merged PR. Do not invent a fifth produ
 Reserved leftover paths, in order, one owner:
 
 1. `src/engine.rs` — used on main (#20 / #23)
-2. `src/cli.rs` — used on main (#21)
+2. `src/cli.rs` — used on main (#21, follow-up #25)
 3. `src/ui.rs` + `src/ui.html` + `src/ui.css` — used on main (#22)
 4. `src/lib.rs` — used on main (#24)
 
