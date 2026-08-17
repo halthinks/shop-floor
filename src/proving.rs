@@ -5,6 +5,7 @@
 //!
 //! Contact surface: `tests/aasm_proving.rs`.
 //! Helpers here are predicates for that surface. They are not a second kernel.
+//! Missing evidence is WAIT. These helpers never invent PASS or VERIFIED.
 
 use crate::aasm_map::{self, EvidenceClass};
 use crate::types::{
@@ -14,6 +15,75 @@ use crate::types::{
 pub const KERNEL: &str = "AASM";
 pub const CONTACT: &str = "tests/aasm_proving.rs";
 pub const MAP: &str = "src/aasm_map.rs";
+
+/// This file points at the contact tests. It is not a second `tests/aasm_proving.rs`.
+pub const SECOND_CONTACT: bool = false;
+
+/// Shop word for missing evidence. Never PASS.
+pub const WAIT: EvidenceStatus = EvidenceStatus::Wait;
+
+/// Contact surface these helpers exist for. Not a second proving test file.
+pub fn contact_surface() -> &'static str {
+    CONTACT
+}
+
+/// Fail-closed: missing evidence is WAIT. Never invent PASS.
+pub fn missing_evidence() -> EvidenceStatus {
+    EvidenceStatus::Wait
+}
+
+/// Fail-closed class for missing evidence. INFORMATION_GAP, never PASS.
+pub fn missing_evidence_class() -> EvidenceClass {
+    EvidenceClass::InformationGap
+}
+
+/// `None` is WAIT. A recorded `Some(Pass)` is passed through, not minted here.
+pub fn recorded_or_wait(status: Option<EvidenceStatus>) -> EvidenceStatus {
+    status.unwrap_or(WAIT)
+}
+
+/// `None` is INFORMATION_GAP. A recorded `Some(Pass)` is passed through, not minted here.
+pub fn recorded_class_or_wait(class: Option<EvidenceClass>) -> EvidenceClass {
+    class.unwrap_or(EvidenceClass::InformationGap)
+}
+
+/// Parent with no verify record, or a WAIT/gap record, is WAIT. Never invent PASS.
+pub fn parent_evidence_or_wait(parent: &Parent) -> EvidenceStatus {
+    match &parent.verify {
+        Some(rec) if rec.status == EvidenceStatus::Pass && rec.class == EvidenceClass::Pass => {
+            EvidenceStatus::Pass
+        }
+        _ => EvidenceStatus::Wait,
+    }
+}
+
+/// Parent with no verify record is INFORMATION_GAP. Stuffed PASS class + WAIT status is gap.
+pub fn parent_class_or_wait(parent: &Parent) -> EvidenceClass {
+    match &parent.verify {
+        Some(rec) if rec.class == EvidenceClass::Pass && rec.status == EvidenceStatus::Pass => {
+            EvidenceClass::Pass
+        }
+        Some(rec) if rec.class != EvidenceClass::Pass => rec.class,
+        _ => EvidenceClass::InformationGap,
+    }
+}
+
+/// Build a WAIT record from a gap reason. Never PASS, even if `reason` says PASS.
+pub fn wait_record(reason: &str) -> VerifyRecord {
+    let class = match aasm_map::classify_wait_reason(reason) {
+        EvidenceClass::Pass => EvidenceClass::InformationGap,
+        other => other,
+    };
+    VerifyRecord {
+        cmd: String::new(),
+        exit_code: None,
+        last_lines: reason.into(),
+        status: EvidenceStatus::Wait,
+        class,
+        aasm_note: aasm_map::note_for(class).into(),
+        recorded_at: 0,
+    }
+}
 
 /// Recorded verify PASS: parent VERIFIED, evidence-plane PASS, exit 0.
 pub fn recorded_verify_pass(parent: &Parent) -> bool {
@@ -75,9 +145,7 @@ pub fn joined_siblings_survive(before: &Parent, after: &Parent, bounced_id: &str
             return true;
         }
         after.children.get(id).is_some_and(|kept| {
-            kept.state == ChildState::Joined
-                && kept.peer == child.peer
-                && kept.paths == child.paths
+            kept.state == ChildState::Joined && kept.peer == child.peer && kept.paths == child.paths
         })
     })
 }
@@ -143,6 +211,80 @@ mod tests {
             aasm_note: aasm_map::VERIFY_PASS_NOTE.into(),
             recorded_at: 1,
         }
+    }
+
+    #[test]
+    fn missing_evidence_is_wait_never_pass_or_verified() {
+        assert!(!SECOND_CONTACT);
+        assert_eq!(contact_surface(), "tests/aasm_proving.rs");
+        assert_eq!(CONTACT, "tests/aasm_proving.rs");
+        assert_eq!(WAIT, EvidenceStatus::Wait);
+        assert_eq!(missing_evidence(), EvidenceStatus::Wait);
+        assert_ne!(missing_evidence(), EvidenceStatus::Pass);
+        assert_eq!(missing_evidence_class(), EvidenceClass::InformationGap);
+        assert!(missing_evidence_class().is_shop_wait());
+        assert_ne!(missing_evidence_class(), EvidenceClass::Pass);
+        assert_eq!(recorded_or_wait(None), EvidenceStatus::Wait);
+        assert_eq!(
+            recorded_or_wait(Some(EvidenceStatus::Pass)),
+            EvidenceStatus::Pass,
+            "already-recorded PASS is not invented here"
+        );
+        assert_eq!(recorded_class_or_wait(None), EvidenceClass::InformationGap);
+        assert_ne!(recorded_class_or_wait(None), EvidenceClass::Pass);
+        assert_eq!(
+            recorded_class_or_wait(Some(EvidenceClass::Pass)),
+            EvidenceClass::Pass
+        );
+
+        let p = Parent::new("P".into(), "t".into(), "b".into());
+        assert_eq!(parent_evidence_or_wait(&p), EvidenceStatus::Wait);
+        assert_eq!(parent_class_or_wait(&p), EvidenceClass::InformationGap);
+        assert!(!recorded_verify_pass(&p));
+        assert!(parent_wait_is_not_verified(&p));
+        assert!(!close_allowed(&p));
+
+        let mut stuffed = p.clone();
+        stuffed.state = ParentState::Verified;
+        assert_eq!(parent_evidence_or_wait(&stuffed), EvidenceStatus::Wait);
+        assert_eq!(
+            parent_class_or_wait(&stuffed),
+            EvidenceClass::InformationGap
+        );
+        assert!(!recorded_verify_pass(&stuffed));
+        assert!(!parent_wait_is_not_verified(&stuffed));
+        assert!(!close_allowed(&stuffed));
+
+        let mut wait_pass_class = p.clone();
+        wait_pass_class.verify = Some(VerifyRecord {
+            cmd: String::new(),
+            exit_code: None,
+            last_lines: "PASS".into(),
+            status: EvidenceStatus::Wait,
+            class: EvidenceClass::Pass,
+            aasm_note: String::new(),
+            recorded_at: 1,
+        });
+        assert_eq!(
+            parent_evidence_or_wait(&wait_pass_class),
+            EvidenceStatus::Wait
+        );
+        assert_eq!(
+            parent_class_or_wait(&wait_pass_class),
+            EvidenceClass::InformationGap
+        );
+
+        let gap = wait_record("no verify command recorded");
+        assert_eq!(gap.status, EvidenceStatus::Wait);
+        assert_ne!(gap.status, EvidenceStatus::Pass);
+        assert_eq!(gap.class, EvidenceClass::InformationGap);
+        assert_ne!(gap.class, EvidenceClass::Pass);
+        assert!(wait_is_not_verified(&gap));
+
+        let stuffed_word = wait_record("PASS VERIFIED CLOSED");
+        assert_eq!(stuffed_word.status, EvidenceStatus::Wait);
+        assert_ne!(stuffed_word.class, EvidenceClass::Pass);
+        assert!(wait_is_not_verified(&stuffed_word));
     }
 
     #[test]
