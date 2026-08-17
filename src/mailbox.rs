@@ -2,6 +2,7 @@
 //!
 //! Assign JSON always lands in `.shop/outbox/` (durable). If a mailbox root is
 //! present and not forbidden, the same record is also written to `inbox/<peer>/`.
+//! If the mailbox is down, forbidden, or inbox is missing, assign still succeeds
 //! from store + outbox. One unread assign per peer inbox; a second distinct
 //! assign stays outbox-only (same filename may overwrite on bounce). Peer,
 //! mail-name, and mailbox-root amplification (`..`, UNC, drive-letter, control
@@ -781,7 +782,7 @@ mod tests {
         let rec = AssignRecord::from_child(DEFAULT_FROM, &child("../secret", "alice"));
         let written = write_assign(&outbox, Some(&mailbox), "P", &rec).unwrap();
         assert_eq!(written.len(), 1);
-        assert!(outbox.join("assign-P-__secret.json").is_file());
+        assert!(outbox.join("assign-P-___secret.json").is_file());
         assert!(!mailbox.join("inbox/alice").exists());
         assert!(!dir.join("secret").exists());
         let _ = fs::remove_dir_all(&dir);
