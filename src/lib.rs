@@ -26,6 +26,7 @@ pub mod paths;
 pub mod project;
 pub mod proving;
 pub mod replies;
+pub mod runner;
 pub mod secret_scan;
 pub mod skills;
 pub mod skills_live;
