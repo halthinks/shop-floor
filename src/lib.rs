@@ -24,6 +24,7 @@ pub mod mailbox;
 pub mod memory;
 pub mod paths;
 pub mod project;
+pub mod proving;
 pub mod replies;
 pub mod secret_scan;
 pub mod skills;

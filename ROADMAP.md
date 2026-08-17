@@ -2,7 +2,7 @@
 
 This PR is the floor: hold-split-join, workers as capacity, GitHub (public now, private with token), project picker, Talk to the boss, shop memory, floor memory, file-based reply ingest.
 
-Shop obeys AASM and does not copy it. See `src/aasm_map.rs` for the shop-word → AASM 0.56.1 dictionary (backjump, evidence class, lease/parent-subset). Reduce is not AASM recombine.
+Shop is the AASM proving ground. It does not copy the kernel. See `src/aasm_map.rs` and `docs/AASM_PROVING_GROUND.md`. Proving-ground tests in `tests/aasm_proving.rs` stay required.
 
 Next, in order:
 
