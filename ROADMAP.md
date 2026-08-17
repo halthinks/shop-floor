@@ -10,7 +10,7 @@ Next, in order:
    Launch the assigned AI (Grok Build / Cursor / tagged backend). Cut an isolated git worktree per child. Wait on a real process. A name on the roster is not a running worker.
 
 2. Windows binary + CI
-   `cargo build --release` artifact people can run on Windows. GitHub Actions: test on Linux, release a Windows binary. `shop ui` has to be a thing you start, not a cloud-agent myth.
+   `cargo build --release` artifact people can run on Windows. GitHub Actions: test on Linux, release a Windows binary. `shop ui` has to be a thing you start, not a cloud-agent myth. GitHub Actions CI now exists for this item.
 
 3. More than one project
    Multiple open floors. Switch without losing the other project's memory/floor.
