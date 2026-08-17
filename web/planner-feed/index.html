@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Captain — Planner</title>
+  <link rel="stylesheet" href="feed.css">
+</head>
+<body class="planner-feed-page">
+<!--
+  Fragment: place #planner-feed at the top of a host page and load feed.css.
+  Polls GET /planner-feed.json (then relative planner-feed.json).
+  Renders only what the feed publishes. Empty or missing is WAIT.
+  Never invents thoughts, actions, counts, or TextPCB work.
+-->
+<aside id="planner-feed" class="planner-feed" data-src="/planner-feed.json" aria-label="Planner train of thought">
+  <header class="planner-feed__bar">
+    <div class="planner-feed__identity">
+      <span class="planner-feed__mark">Captain</span>
+      <span class="planner-feed__role">Planner</span>
+    </div>
+    <p class="planner-feed__lede">Train of thought</p>
+    <div class="planner-feed__status" data-state="wait" aria-live="polite">
+      <span class="planner-feed__pulse" aria-hidden="true"></span>
+      <span class="planner-feed__state">WAIT</span>
+    </div>
+  </header>
+
+  <div class="planner-feed__ticker" hidden>
+    <div class="planner-feed__ticker-track" data-ticker></div>
+  </div>
+
+  <div class="planner-feed__rails">
+    <section class="planner-feed__rail" data-kind="thoughts">
+      <h2>Thoughts</h2>
+      <div class="planner-feed__viewport">
+        <div class="planner-feed__train" data-stream="thoughts">
+          <p class="planner-feed__wait">WAIT — no planner thoughts published</p>
+        </div>
+      </div>
+    </section>
+    <section class="planner-feed__rail" data-kind="actions">
+      <h2>Actions</h2>
+      <div class="planner-feed__viewport">
+        <div class="planner-feed__train" data-stream="actions">
+          <p class="planner-feed__wait">WAIT — no planner actions published</p>
+        </div>
+      </div>
+    </section>
+  </div>
+</aside>
+<script>
+(function () {
+  var root = document.getElementById('planner-feed');
+  if (!root || root.getAttribute('data-bound') === '1') return;
+  root.setAttribute('data-bound', '1');
+
+  var POLL_MS = 3000;
+  var primary = root.getAttribute('data-src') || '/planner-feed.json';
+  var fallbacks = [primary, 'planner-feed.json', './planner-feed.json'];
+  var seen = {};
+  var lastSig = '';
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c];
+    });
+  }
+
+  function asList(v) {
+    if (v == null) return [];
+    if (Array.isArray(v)) return v;
+    if (Array.isArray(v.items)) return v.items;
+    if (Array.isArray(v.entries)) return v.entries;
+    if (Array.isArray(v.lines)) return v.lines;
+    return [];
+  }
+
+  function waitOf(v) {
+    if (v == null) return 'WAIT';
+    if (typeof v === 'string' && /^WAIT/i.test(v)) return v;
+    if (v.WAIT) return String(v.WAIT);
+    if (v.wait) return String(v.wait);
+    return null;
+  }
+
+  function itemText(it) {
+    if (it == null) return '';
+    if (typeof it === 'string') return it.trim();
+    var keys = ['text', 'body', 'thought', 'action', 'message', 'note', 'title'];
+    for (var i = 0; i < keys.length; i++) {
+      if (it[keys[i]]) return String(it[keys[i]]).trim();
+    }
+    return '';
+  }
+
+  function itemAt(it) {
+    if (!it || typeof it !== 'object') return '';
+    if (it.at) return String(it.at);
+    if (it.time) return String(it.time);
+    if (it.when) return String(it.when);
+    if (it.ts != null && it.ts !== '') return String(it.ts);
+    return '';
+  }
+
+  function itemKind(it) {
+    if (!it || typeof it !== 'object') return '';
+    return String(it.kind || it.type || it.stream || '').toLowerCase();
+  }
+
+  function itemId(kind, it, idx) {
+    if (it && typeof it === 'object' && it.id) return kind + ':' + it.id;
+    return kind + ':' + itemAt(it) + ':' + itemText(it) + ':' + idx;
+  }
+
+  function clock(at) {
+    var s = String(at || '');
+    if (s.length >= 19 && s.charAt(10) === 'T') return s.slice(11, 19);
+    if (/^\d+$/.test(s)) return '';
+    return s;
+  }
+
+  function newestFirst(list) {
+    var copy = list.slice();
+    var stamped = copy.filter(function (it) { return itemAt(it); });
+    if (stamped.length === copy.length && copy.length > 1) {
+      copy.sort(function (a, b) {
+        return String(itemAt(b)).localeCompare(String(itemAt(a)));
+      });
+    }
+    return copy;
+  }
+
+  function splitFeed(data) {
+    var thoughts = asList(data && (data.thoughts || data.thought || data.thinking));
+    var actions = asList(data && (data.actions || data.action || data.acts));
+    var mixed = asList(data && (data.feed || data.items || data.entries || data.lines));
+    mixed.forEach(function (it) {
+      var k = itemKind(it);
+      if (k === 'thought' || k === 'thoughts' || k === 'thinking') thoughts.push(it);
+      else if (k === 'action' || k === 'actions' || k === 'act') actions.push(it);
+    });
+    thoughts = newestFirst(thoughts).filter(function (it) { return itemText(it); });
+    actions = newestFirst(actions).filter(function (it) { return itemText(it); });
+    return { thoughts: thoughts, actions: actions };
+  }
+
+  function setState(live, reason) {
+    var el = root.querySelector('.planner-feed__status');
+    var word = el.querySelector('.planner-feed__state');
+    el.setAttribute('data-state', live ? 'live' : 'wait');
+    word.textContent = live ? 'LIVE' : (reason ? String(reason) : 'WAIT');
+  }
+
+  function renderStream(kind, items, waitMsg) {
+    var train = root.querySelector('[data-stream="' + kind + '"]');
+    train.classList.remove('is-streaming');
+    if (!items.length) {
+      train.innerHTML = '<p class="planner-feed__wait">' + esc(waitMsg) + '</p>';
+      return;
+    }
+    var html = items.map(function (it, idx) {
+      var id = itemId(kind, it, idx);
+      var fresh = !seen[id] ? ' is-fresh' : '';
+      var at = clock(itemAt(it));
+      var bare = at ? '' : ' planner-feed__item--bare';
+      return '<article class="planner-feed__item' + bare + fresh + '" data-id="' + esc(id) + '">' +
+        (at ? '<time>' + esc(at) + '</time>' : '') +
+        '<p>' + esc(itemText(it)) + '</p>' +
+        '</article>';
+    }).join('');
+    train.innerHTML = items.length >= 4 ? html + html : html;
+    if (items.length >= 4) train.classList.add('is-streaming');
+    items.forEach(function (it, idx) { seen[itemId(kind, it, idx)] = 1; });
+  }
+
+  function renderTicker(thoughts, actions) {
+    var wrap = root.querySelector('.planner-feed__ticker');
+    var track = root.querySelector('[data-ticker]');
+    var bits = [];
+    if (thoughts[0]) bits.push({ k: 'thought', t: itemText(thoughts[0]) });
+    if (actions[0]) bits.push({ k: 'action', t: itemText(actions[0]) });
+    if (!bits.length) {
+      wrap.hidden = true;
+      track.innerHTML = '';
+      return;
+    }
+    var html = bits.map(function (b) {
+      return '<span class="planner-feed__tick planner-feed__tick--' + b.k + '">' +
+        '<em>' + (b.k === 'thought' ? 'thought' : 'action') + '</em> ' + esc(b.t) +
+        '</span>';
+    }).join('');
+    track.innerHTML = html + html;
+    wrap.hidden = false;
+  }
+
+  async function pull() {
+    var lastErr = 'WAIT — planner-feed.json not published';
+    for (var i = 0; i < fallbacks.length; i++) {
+      try {
+        var r = await fetch(fallbacks[i], { cache: 'no-store' });
+        if (!r.ok) {
+          lastErr = 'WAIT — planner-feed.json ' + r.status;
+          continue;
+        }
+        var t = await r.text();
+        var data;
+        try { data = JSON.parse(t); }
+        catch (e) {
+          var bad = 'WAIT — planner-feed.json is not JSON';
+          if (lastSig === bad) return;
+          lastSig = bad;
+          renderStream('thoughts', [], bad);
+          renderStream('actions', [], bad);
+          renderTicker([], []);
+          setState(false, bad);
+          return;
+        }
+        var w = waitOf(data);
+        var streams = splitFeed(data);
+        var has = streams.thoughts.length + streams.actions.length > 0;
+        var sig = JSON.stringify({
+          w: w,
+          t: streams.thoughts.map(itemText),
+          a: streams.actions.map(itemText),
+          ta: streams.thoughts.map(itemAt),
+          aa: streams.actions.map(itemAt)
+        });
+        if (sig === lastSig) return;
+        lastSig = sig;
+        if (!has) {
+          renderStream('thoughts', [], w || 'WAIT — no planner thoughts published');
+          renderStream('actions', [], w || 'WAIT — no planner actions published');
+          renderTicker([], []);
+          setState(false, w || 'WAIT');
+          return;
+        }
+        renderStream('thoughts', streams.thoughts, 'WAIT — no planner thoughts published');
+        renderStream('actions', streams.actions, 'WAIT — no planner actions published');
+        renderTicker(streams.thoughts, streams.actions);
+        setState(true);
+        return;
+      } catch (e) {
+        lastErr = 'WAIT — planner-feed.json unreachable';
+      }
+    }
+    if (lastSig === lastErr) return;
+    lastSig = lastErr;
+    renderStream('thoughts', [], lastErr);
+    renderStream('actions', [], lastErr);
+    renderTicker([], []);
+    setState(false, lastErr);
+  }
+
+  pull();
+  setInterval(pull, POLL_MS);
+})();
+</script>
+</body>
+</html>
