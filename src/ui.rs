@@ -435,22 +435,30 @@ fn github_module(shop: &Shop, pull: Option<String>) -> Value {
         "issue_count": list_count(&issues),
         "pr_count": list_count(&pulls),
         "check_count": list_count(&checks),
-        "count_note": "null count is WAIT; never invent a zero",
+        "count_note": "null count is WAIT; one API page is not the total; never invent a zero",
         "skills": crate::skills::SKILL_PACK,
     })
 }
 
 fn list_count(v: &Value) -> Value {
-    if let Some(arr) = v.as_array() {
-        return json!(arr.len() as u64);
-    }
-    if let Some(items) = v.get("items").and_then(|x| x.as_array()) {
-        return json!(items.len() as u64);
-    }
-    if let Some(runs) = v.get("check_runs").and_then(|x| x.as_array()) {
-        return json!(runs.len() as u64);
+    // One GitHub API page is not the repository total. Only an
+    // authoritative total_count is a count. Missing total is WAIT.
+    if let Some(n) = authoritative_total(v) {
+        return json!(n);
     }
     json!(null)
+}
+
+fn authoritative_total(v: &Value) -> Option<u64> {
+    if v.as_str().is_some() {
+        return None;
+    }
+    if v.get("WAIT").is_some() || v.get("error").is_some() {
+        return None;
+    }
+    v.get("total_count")
+        .and_then(|x| x.as_u64())
+        .or_else(|| v.get("total").and_then(|x| x.as_u64()))
 }
 
 fn floor_payload(shop: &Shop) -> Value {
@@ -479,16 +487,13 @@ fn floor_payload(shop: &Shop) -> Value {
 }
 
 fn jobs_payload(shop: &Shop) -> Value {
-    match shop.awareness(None) {
-        Ok(a) => {
-            let jobs = a.jobs_from_workers();
-            json!({
-                "jobs": jobs,
-                "count": jobs.len() as u64,
-                "working": crate::awareness::observed_working_jobs(&jobs) as u64,
-                "count_note": "count is observed length; missing pid is WAIT; never invent working",
-            })
-        }
+    match local_live_jobs(shop) {
+        Ok(jobs) => json!({
+            "jobs": jobs,
+            "count": jobs.len() as u64,
+            "working": crate::awareness::observed_working_jobs(&jobs) as u64,
+            "count_note": "count is observed length; missing pid is WAIT; never invent working",
+        }),
         Err(e) => json!({
             "WAIT": e.to_string(),
             "jobs": "WAIT",
@@ -497,6 +502,39 @@ fn jobs_payload(shop: &Shop) -> Value {
             "count_note": "null count is WAIT; never invent a zero",
         }),
     }
+}
+
+fn local_live_jobs(shop: &Shop) -> Result<Vec<crate::awareness::JobView>> {
+    let state = shop.state()?;
+    let ledger = shop.procwait()?;
+    let parents: Vec<crate::awareness::ParentView> = state
+        .parents
+        .values()
+        .map(|p| crate::awareness::ParentView {
+            id: p.id.clone(),
+            title: p.title.clone(),
+            state: p.state,
+            children: p
+                .children
+                .values()
+                .map(|c| crate::awareness::ChildView {
+                    id: c.id.clone(),
+                    peer: c.peer.clone(),
+                    state: c.state,
+                    paths: c.paths.clone(),
+                    branch: c.branch.clone(),
+                    dispatched: c.dispatched,
+                })
+                .collect(),
+            verify: p.verify.as_ref().map(|v| v.status),
+            github_pr_url: p.github_pr_url.clone(),
+            github_pr_status: p.github_pr_status,
+            github_merged: p.github_merged,
+            github_merge_status: p.github_merge_status,
+            github_merge_reason: p.github_merge_reason.clone(),
+        })
+        .collect();
+    Ok(crate::awareness::live_jobs(&parents, &ledger.processes))
 }
 
 fn mailbox_payload(shop: &Shop) -> Value {
@@ -525,7 +563,18 @@ fn boss_payload(shop: &Shop) -> Value {
     }
     match fs::read_to_string(&path) {
         Ok(raw) => match serde_json::from_str::<Value>(&raw) {
-            Ok(v) if v.is_object() => v,
+            Ok(mut v) if v.is_object() => {
+                if let Some(obj) = v.as_object_mut() {
+                    if obj.get("WAIT").is_none() {
+                        if let Some(w) = obj.get("wait").cloned() {
+                            if !w.is_null() {
+                                obj.insert("WAIT".into(), w);
+                            }
+                        }
+                    }
+                }
+                v
+            }
             Ok(_) => json!({"WAIT": "boss view is not an object"}),
             Err(e) => json!({"WAIT": format!("boss view unreadable: {e}")}),
         },

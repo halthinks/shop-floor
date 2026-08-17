@@ -453,22 +453,26 @@ async function refreshMailbox(){
 async function refreshBoss(){
   const b = await j('/api/boss');
   const el = document.getElementById('boss-body');
-  if (b.WAIT) {
-    el.innerHTML = '<div class="quiet">' + esc(waitWords(b.WAIT)) + '</div>'
+  const waitReason = b.WAIT || b.wait;
+  const cur = b.current;
+  const kids = Array.isArray(b.children) ? b.children : [];
+  if (waitReason && !cur && !kids.length && !b.screen) {
+    el.innerHTML = '<div class="quiet">' + esc(waitWords(waitReason)) + '</div>'
       + '<div class="quiet">' + esc(b.note || 'A snapshot is Evidence. It cannot verify or close.') + '</div>';
     return;
   }
-  const cur = b.current;
   const headline = cur ? (String(cur.id||'') + ' ' + String(cur.state||'')) : 'Waiting — no job open';
-  const kids = Array.isArray(b.children) ? b.children : [];
   const kidHtml = kids.length
     ? kids.map(c => `<div class="child-line"><span>${esc(c.id)}</span><span>${esc(c.state)}</span><span>${esc(c.peer)}</span></div>`).join('')
     : '<div class="quiet">None yet</div>';
   const cls = b.class || b.status || 'Evidence';
+  const waitHtml = waitReason
+    ? '<div class="quiet">' + esc(waitWords(waitReason)) + '</div>'
+    : '';
   const screen = b.screen ? '<div class="boss-screen">' + esc(String(b.screen).slice(0, 800)) + '</div>' : '';
   el.innerHTML = `<div class="boss-snap">${esc(headline)}</div>
     <div class="quiet">${esc(cls)} · Evidence only; cannot verify or close</div>
-    ${kidHtml}${screen}`;
+    ${waitHtml}${kidHtml}${screen}`;
 }
 
 async function refreshSteer(){
