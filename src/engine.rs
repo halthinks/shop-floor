@@ -22,7 +22,9 @@ use crate::error::{Result, ShopError};
 use crate::floor::FloorMemory;
 use crate::github::{child_branch_name, GitHubRepo};
 use crate::hash::{fingerprint, unix_now};
-use crate::mailbox::{observe, write_assign, AssignRecord, MailboxObservation, DEFAULT_FROM};
+use crate::mailbox::{
+    observe, write_assign, AssignRecord, MailboxObservation, ASSIGN_TYPE, DEFAULT_FROM, HOLD_UNREAD,
+};
 use crate::memory::{MemoryTier, ShopMemory};
 use crate::paths::{parse_paths, paths_overlap};
 use crate::procwait::{self, LiveProcess, ProcWaitLedger, ProcessBind, StopRecord, WaitEvidence};
@@ -1830,7 +1832,7 @@ fn load_handoff(spec: &str) -> Result<Handoff> {
             "empty handoff; accept refuses to fake PASS".into(),
         ));
     }
-    let status = handoff_status(&bytes);
+    let status = handoff_status(&bytes)?;
     Ok(Handoff {
         hash: fingerprint(&bytes),
         status,
@@ -1839,8 +1841,16 @@ fn load_handoff(spec: &str) -> Result<Handoff> {
     })
 }
 
-fn handoff_status(bytes: &[u8]) -> String {
+/// Worker-claimed PASS or DONE only. Missing or incomplete status is WAIT.
+/// An unread assign JSON is HOLD, never an invented PASS.
+fn handoff_status(bytes: &[u8]) -> Result<String> {
     if let Ok(v) = serde_json::from_slice::<Value>(bytes) {
+        if v.get("type")
+            .and_then(|t| t.as_str())
+            .is_some_and(|t| t.eq_ignore_ascii_case(ASSIGN_TYPE))
+        {
+            return Err(ShopError::IncompleteEvidence(HOLD_UNREAD.into()));
+        }
         if let Some(s) = v
             .get("status")
             .or_else(|| v.get("result"))
@@ -1848,11 +1858,13 @@ fn handoff_status(bytes: &[u8]) -> String {
         {
             let up = s.to_ascii_uppercase();
             if up == "PASS" || up == "DONE" {
-                return up;
+                return Ok(up);
             }
         }
     }
-    "PASS".to_string()
+    Err(ShopError::IncompleteEvidence(
+        "WAIT: handoff missing PASS/DONE status; accept refuses to invent PASS".into(),
+    ))
 }
 
 fn run_verify_command(cmd: &str) -> VerifyRecord {
