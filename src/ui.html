@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>shop</title>
+  <link rel="stylesheet" href="/ui.css">
+</head>
+<body>
+<div id="command-center">
+  <header id="topbar">
+    <div class="wordmark">shop</div>
+    <button type="button" id="project-switcher" aria-expanded="false" aria-controls="project-palette">
+      <span id="project-name">Open project</span>
+    </button>
+    <div id="global-pills">
+      <span id="live-pill" class="action-pill wait">WAIT</span>
+    </div>
+    <div id="top-github">GitHub</div>
+    <div id="top-mailbox">mailbox</div>
+  </header>
+
+  <div id="project-palette" hidden>
+    <p class="help">A folder on this machine, or a GitHub repo.</p>
+    <div id="project-tabs">
+      <button type="button" id="tab-local" class="tab on">This computer</button>
+      <button type="button" id="tab-github" class="tab">GitHub</button>
+    </div>
+    <div id="pane-local">
+      <form id="open-folder">
+        <label for="open-folder-path">Open folder</label>
+        <input id="open-folder-path" name="path" placeholder="/path/to/repo" autocomplete="off">
+      </form>
+      <div class="label">Recents</div>
+      <div id="recents"></div>
+    </div>
+    <div id="pane-github" hidden>
+      <div id="github-projects-wait"></div>
+      <form id="github-connect-picker">
+        <label class="sr">Owner <input name="owner" placeholder="owner" autocomplete="off"></label>
+        <label class="sr">Repo <input name="name" placeholder="repo" autocomplete="off"></label>
+        <label class="sr">Token <input name="token" type="password" autocomplete="off" placeholder="token"></label>
+        <button type="submit">Connect</button>
+      </form>
+      <div id="github-repo-list"></div>
+    </div>
+  </div>
+
+  <div id="stage">
+    <section id="workers">
+      <div class="label">Workers</div>
+      <h2>Workers</h2>
+      <p class="help">Who can take a job, and which AI they run.</p>
+      <div id="worker-roster"></div>
+      <form id="add-worker">
+        <label class="sr">Add worker <input name="name" required placeholder="Add worker" autocomplete="off"></label>
+        <label class="sr">AI
+          <select id="intelligence-backend" name="backend" aria-label="AI">
+            <option value="cursor">Cursor</option>
+            <option value="cursor-ultra">Cursor Ultra</option>
+            <option value="grok-ultra">Grok Ultra</option>
+            <option value="grok-bot">Grok Bot</option>
+            <option value="grok-build">SuperGrokHeavy</option>
+          </select>
+        </label>
+        <label class="sr">Model <input id="intelligence-model" name="model" placeholder="Cursor Ultra model id" autocomplete="off"></label>
+        <label class="skills-toggle"><input type="checkbox" name="github_skills" value="1" checked> GitHub skills</label>
+        <button type="submit">Add worker</button>
+      </form>
+      <div id="pill-legend" hidden>
+        <span class="action-pill idle">idle</span>
+        <span class="action-pill assigned">assigned</span>
+        <span class="action-pill working">working</span>
+        <span class="action-pill live">live</span>
+        <span class="action-pill wait">wait</span>
+        <span class="action-pill bounced">bounced</span>
+      </div>
+    </section>
+
+    <section id="floor">
+      <div class="label">Floor</div>
+      <h2>Current job</h2>
+      <p class="help">One parent job. Kids stay on their own files.</p>
+      <div id="floor-body"></div>
+    </section>
+
+    <section id="github">
+      <div class="label">GitHub</div>
+      <h2>GitHub</h2>
+      <p class="help">Public repos work now. Private repos need gh or a token.</p>
+      <div id="github-repo"></div>
+      <div id="github-auth"></div>
+      <form id="github-connect">
+        <label class="sr">Owner <input name="owner" placeholder="owner" autocomplete="off"></label>
+        <label class="sr">Repo <input name="name" placeholder="repo" autocomplete="off"></label>
+        <label class="sr">Branch <input name="branch" placeholder="main" autocomplete="off"></label>
+        <label class="sr">Token <input name="token" type="password" autocomplete="off" placeholder="token"></label>
+        <button type="submit">Connect</button>
+      </form>
+      <div class="label">Issues</div>
+      <div id="github-issues"></div>
+      <div class="label">Pull requests</div>
+      <div id="github-pulls"></div>
+      <div class="label">Checks</div>
+      <div id="github-checks"></div>
+      <div class="label">Search</div>
+      <form id="github-search">
+        <label class="sr">Search in
+          <select name="kind" aria-label="Search in">
+            <option value="code">code</option>
+            <option value="issues">issues</option>
+            <option value="pulls">pulls</option>
+          </select>
+        </label>
+        <label class="sr">Query <input name="q" placeholder="search" autocomplete="off"></label>
+        <button type="submit">Search</button>
+      </form>
+      <div id="github-search-results"></div>
+      <div class="label">Files</div>
+      <form id="github-file">
+        <label class="sr">File path <input name="path" placeholder="file path" autocomplete="off"></label>
+        <button type="submit">Open</button>
+      </form>
+      <div id="github-file-body"></div>
+      <div class="label">Reviews</div>
+      <div id="github-reviews"></div>
+      <form id="github-merge">
+        <input type="hidden" name="parent" id="merge-parent" value="">
+        <button type="submit" id="merge-btn" class="text-control" disabled>Merge</button>
+        <span class="help">Only after the job is verified</span>
+      </form>
+    </section>
+
+    <section id="control">
+      <div class="label">Talk to the boss</div>
+      <h2>Talk to the boss</h2>
+      <p class="help">SuperGrokHeavy · orchestrator and planner</p>
+      <div id="boss-status">SuperGrokHeavy · Waiting</div>
+      <div id="chat">
+        <div id="transcript" aria-live="polite"></div>
+        <form id="composer">
+          <label class="sr" for="steer-input">Message the boss</label>
+          <textarea id="steer-input" name="text" rows="2" autocomplete="off" placeholder="Message the boss…"></textarea>
+          <button type="submit" id="send">Send</button>
+        </form>
+      </div>
+      <section id="memory">
+        <div class="label">Memory</div>
+        <h2>What shop remembers</h2>
+        <p class="help">The boss sees this every time you message him.</p>
+        <div id="memory-body"></div>
+      </section>
+    </section>
+  </div>
+
+  <section id="feed">
+    <div class="label">Feed</div>
+    <h2>Activity</h2>
+    <p class="help">What just happened.</p>
+    <a class="atom" href="/feed.xml">Atom</a>
+    <div id="feed-list"></div>
+  </section>
+
+  <footer id="mailbox">
+    <div class="label">Mailbox</div>
+    <h2>Inbox</h2>
+    <p class="help">Unread assigns per worker</p>
+    <div id="mailbox-peers"></div>
+  </footer>
+</div>
+<script>
+const BACKENDS = ['cursor','cursor-ultra','grok-ultra','grok-bot','grok-build'];
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function asList(v){
+  if (v == null) return null;
+  if (Array.isArray(v)) return v;
+  if (v.items && Array.isArray(v.items)) return v.items;
+  if (v.check_runs && Array.isArray(v.check_runs)) return v.check_runs;
+  if (typeof v === 'string') return null;
+  if (v.WAIT || v.error) return null;
+  return null;
+}
+function waitOf(v){
+  if (v == null) return 'WAIT';
+  if (typeof v === 'string' && /^WAIT/i.test(v)) return v;
+  if (v.WAIT) return String(v.WAIT);
+  if (v.error) return String(v.error);
+  return null;
+}
+function countLabel(n){ return (n==null) ? 'WAIT' : String(n); }
+async function j(url, opt){
+  const r = await fetch(url, opt);
+  const t = await r.text();
+  try { return JSON.parse(t); } catch { return { error: t }; }
+}
+function pillClass(action){
+  const a = String(action||'wait').toLowerCase();
+  if (['idle','assigned','working','live','wait','bounced'].includes(a)) return a;
+  return 'wait';
+}
+function pillWord(action){
+  return ({idle:'Idle',assigned:'Assigned',working:'Working',live:'Live',wait:'Waiting',bounced:'Bounced'})[pillClass(action)] || 'Waiting';
+}
+function aiWords(backend){
+  return ({cursor:'Cursor','cursor-ultra':'Cursor Ultra','grok-ultra':'Grok Ultra','grok-bot':'Grok Bot','grok-build':'SuperGrokHeavy'})[backend] || backend || 'AI';
+}
+function waitWords(raw){
+  const s = String(raw||'');
+  if (/mailbox/i.test(s)) return 'Mailbox not found';
+  if (/token|sign-in|auth|gh /i.test(s)) return 'Waiting for GitHub sign-in';
+  if (/store/i.test(s)) return 'Waiting for the shop store';
+  if (/not connected/i.test(s)) return 'Waiting — connect a repo';
+  const t = s.replace(/^WAIT:\s*/i,'').trim();
+  return t ? ('Waiting — ' + t) : 'Waiting';
+}
+function eventSentence(e){
+  const op = e && (e.title || e.op) || '';
+  const who = e && (e.peer || e.parent || e.repo) || '';
+  const map = {
+    'worker added': 'A worker was added to the roster.',
+    'intelligence assigned': 'A worker’s AI was changed.',
+    'parent open': 'A parent job was opened.',
+    'split': 'Work was split into a child.',
+    'assign written': 'An assign was written to the inbox.',
+    'accept': 'A child handoff was accepted.',
+    'bounce': 'A child was bounced back.',
+    'join': 'The join barrier was checked.',
+    'reduce': 'The parent was reduced.',
+    'verify': 'Verify ran on the parent.',
+    'github connect': 'A GitHub repo was connected.',
+    'mailbox WAIT': 'Mailbox was missing for an assign.',
+    'merge blocked': 'Merge stayed blocked.',
+    'merge allowed': 'Merge was recorded.',
+    'close': 'The parent job was closed.'
+  };
+  const base = map[op] || (op ? String(op) : 'Something was recorded.');
+  return who ? base.replace(/\.$/, '') + ' (' + who + ').' : base;
+}
+function renderList(el, data, line, emptyWait){
+  const w = waitOf(data);
+  const arr = asList(data);
+  if (arr) {
+    if (!arr.length) { el.innerHTML = '<div class="quiet">None yet</div>'; return; }
+    el.innerHTML = arr.slice(0, 24).map(line).join('');
+    return;
+  }
+  el.innerHTML = '<div class="quiet">' + esc(emptyWait || (w ? waitWords(w) : 'Waiting — connect a repo')) + '</div>';
+}
+function timeOf(ev){
+  const at = ev && ev.at ? String(ev.at) : '';
+  return at.length >= 19 ? at.slice(11,19) : at;
+}
+
+let selectedPull = null;
+
+async function refresh(){
+  let st;
+  try { st = await j('/api/status'); }
+  catch { st = { store_ok:false, waits:['WAIT: store unreadable'] }; }
+
+  const storeOk = st.store_ok !== false;
+  const mailOk = !!(st.mailbox && st.mailbox.present && !st.mailbox.wait);
+  const pill = document.getElementById('live-pill');
+  const gp = document.getElementById('global-pills');
+  if (storeOk && mailOk) {
+    pill.textContent = 'LIVE';
+    pill.className = 'action-pill live';
+  } else {
+    const miss = (st.mailbox && st.mailbox.wait) || (st.waits && st.waits[0]) || 'store';
+    pill.textContent = waitWords(miss);
+    pill.className = 'action-pill wait';
+  }
+  let extra = '';
+  if (st.github && st.github.wait && /token|auth|sign-in/i.test(String(st.github.wait))) {
+    extra += '<span class="action-pill wait">Waiting for GitHub sign-in</span>';
+  }
+  gp.innerHTML = pill.outerHTML + extra;
+
+  const proj = st.project || {};
+  document.getElementById('project-name').textContent = proj.name || proj.path || 'Open project';
+  document.getElementById('top-github').textContent = (st.github && st.github.repo) ? st.github.repo : 'GitHub';
+  const mb = st.mailbox && st.mailbox.root ? st.mailbox.root.split(/[\\\\/]/).slice(-2).join('/') : 'mailbox';
+  document.getElementById('top-mailbox').textContent = mb;
+
+  const roster = document.getElementById('worker-roster');
+  const workers = st.workers || [];
+  roster.innerHTML = workers.map(w => {
+    const action = pillClass(w.action);
+    const intel = w.intelligence || {};
+    const skills = w.github_skills !== false;
+    const reason = action === 'idle' ? '' : esc((w.action_reason || '').split(/\s+/).slice(0,8).join(' '));
+    return `<div class="worker-line">
+      <span class="peer">${esc(w.name || w.peer)} <span class="quiet">${esc(w.peer)}</span></span>
+      <form class="intel" action="/workers/${encodeURIComponent(w.peer)}/intelligence" method="post">
+        <label class="sr">AI
+          <select name="backend" aria-label="AI">${BACKENDS.map(b => `<option value="${b}" ${intel.backend===b?'selected':''}>${aiWords(b)}</option>`).join('')}</select>
+        </label>
+        <label class="sr">Model <input name="model" value="${esc(intel.model||'')}" placeholder="Cursor Ultra model id"></label>
+      </form>
+      <form class="skills" action="/workers/${encodeURIComponent(w.peer)}/github-skills" method="post">
+        <label><input type="checkbox" name="enabled" value="1" ${skills?'checked':''}> GitHub skills</label>
+      </form>
+      <span class="state">
+        <span class="action-pill ${action}${action==='working'||action==='live'?' breathe':''}">${pillWord(action)}</span>
+        ${reason ? `<span class="reason">${reason}</span>` : ''}
+      </span>
+    </div>`;
+  }).join('');
+
+  const parents = st.parents || [];
+  const verified = parents.find(p => p.state === 'VERIFIED');
+  document.getElementById('merge-parent').value = verified ? verified.id : '';
+  document.getElementById('merge-btn').disabled = !verified;
+
+  const box = document.getElementById('mailbox-peers');
+  if (st.mailbox && st.mailbox.wait) box.innerHTML = `<span class="wait">${esc(st.mailbox.wait)}</span>`;
+  else if (st.mailbox && st.mailbox.peers && st.mailbox.peers.length) {
+    box.innerHTML = st.mailbox.peers.map(p => `<span>${esc(p.peer)} <b>${p.unread}</b></span>`).join('');
+  }   else box.innerHTML = '<span>No unread assigns</span>';
+
+  const feed = document.getElementById('feed-list');
+  const events = st.events || [];
+  feed.innerHTML = events.length
+    ? events.map(e => `<div class="feed-line"><time>${esc(timeOf(e))}</time><span>${esc(eventSentence(e))}</span></div>`).join('')
+    : '<div class="quiet">Nothing yet.</div>';
+
+  refreshGithub();
+  refreshFloor();
+  refreshSteer();
+  refreshMemory();
+  refreshProject();
+}
+
+async function refreshGithub(){
+  const g = await j(selectedPull ? '/api/github?pull='+encodeURIComponent(selectedPull) : '/api/github');
+  document.getElementById('github-repo').textContent = g.repo || 'Waiting — connect a repo';
+  document.getElementById('github-auth').innerHTML = g.authenticated
+    ? '<div class="quiet">Signed in. Private repos are available.</div>'
+    : '<div class="quiet">Public repos work now. Private repos need gh or a token.</div>';
+  const empty = g.repo ? 'None yet' : 'Waiting — connect a repo';
+  renderList(document.getElementById('github-issues'), g.issues, it =>
+    `<div class="gh-line"><span class="num">${esc(it.number||'')}</span><span>${esc(it.title||it.name||'')}</span></div>`, empty);
+  renderList(document.getElementById('github-pulls'), g.pulls, it =>
+    `<div class="gh-line pull" data-n="${esc(it.number||'')}">#${esc(it.number||'')} ${esc(it.title||'')}</div>`, empty);
+  renderList(document.getElementById('github-checks'), g.checks, it =>
+    `<div class="gh-line">${esc(it.name||it.context||'check')} ${esc(it.conclusion||it.state||it.status||'')}</div>`, empty);
+  const rev = document.getElementById('github-reviews');
+  const reviews = asList(g.reviews) || [];
+  const comments = asList(g.comments) || [];
+  if (!reviews.length && !comments.length) {
+    rev.innerHTML = '<div class="quiet">' + esc(empty) + '</div>';
+  } else {
+    rev.innerHTML = reviews.map(r => `<div class="gh-line">${esc(r.user && r.user.login || r.state || 'review')} ${esc(r.state||'')}</div>`).join('')
+      + comments.map(c => `<div class="gh-line">${esc(c.user && c.user.login || '')} ${esc((c.body||'').slice(0,120))}</div>`).join('');
+  }
+  if (g.merge_parent) document.getElementById('merge-parent').value = g.merge_parent;
+  document.getElementById('merge-btn').disabled = !g.merge_enabled;
+}
+
+async function refreshFloor(){
+  const f = await j('/api/floor');
+  const floor = document.getElementById('floor-body');
+  const cur = f.current;
+  if (!cur) {
+    floor.innerHTML = '<div class="floor-headline">No job open. SuperGrokHeavy starts one, or type open in the panel below.</div>';
+    return;
+  }
+  const kids = (f.children||[]).map(c =>
+    `<div class="child-line"><span>${esc(c.id)}</span><span>${esc(c.state)}</span><span>${esc(c.peer)}</span></div>`
+  ).join('');
+  const chips = (f.claims||[]).flatMap(x => x.paths||[]).map(path => `<span class="chip">${esc(path)}</span>`).join('');
+  floor.innerHTML = `<div class="floor-headline">${esc(cur.id)} <span class="floor-state">${esc(cur.state)}</span></div>
+    <div class="label">Assigned work</div>${kids || '<div class="quiet">None yet</div>'}
+    <div class="label">Locked files</div>${chips?`<div class="chips">${chips}</div>`:'<div class="quiet">None yet</div>'}`;
+}
+
+async function refreshSteer(){
+  const s = await j('/api/steer');
+  const lines = s.lines || [];
+  const el = document.getElementById('transcript');
+  el.innerHTML = lines.map(l => {
+    const role = String(l.role||'');
+    const text = esc(l.text||'');
+    const wait = l.wait ? `<div class="wait">${esc(l.wait)}</div>` : '';
+    if (role === 'user') {
+      return `<div class="bubble-row user"><div class="bubble user">${text}</div></div>`;
+    }
+    if (role === 'shop') {
+      return `<div class="sys-note">${text}${wait}</div>`;
+    }
+    if (role === 'orchestrator' || role === 'boss') {
+      return `<div class="bubble-row boss"><div class="bubble boss">${text}${wait}</div></div>`;
+    }
+    return `<div class="sys-note">${text}${wait}</div>`;
+  }).join('');
+  el.scrollTop = el.scrollHeight;
+  const hasReply = lines.some(l => l.role === 'orchestrator' || l.role === 'boss');
+  const status = hasReply && s.status === 'Live' ? 'Live' : 'Waiting';
+  document.getElementById('boss-status').textContent = 'SuperGrokHeavy · ' + status;
+}
+
+async function refreshMemory(){
+  const m = await j('/api/memory');
+  const el = document.getElementById('memory-body');
+  const facts = m.profile || [];
+  const log = (m.log || []).slice(-8);
+  const factHtml = facts.length
+    ? facts.map(f => `<div class="fact">${esc(f)}</div>`).join('')
+    : '<div class="quiet">Nothing standing yet.</div>';
+  const logHtml = log.length
+    ? log.map(l => `<div class="mem-log">${esc(l.at||'')} ${esc(l.fact||'')}</div>`).join('')
+    : '';
+  el.innerHTML = factHtml + logHtml;
+}
+
+async function refreshProject(){
+  const p = await j('/api/projects');
+  const rec = document.getElementById('recents');
+  const items = p.local_recents || [];
+  rec.innerHTML = items.length
+    ? items.map(r => `<button type="button" class="recent" data-path="${esc(r.path)}">${esc(r.name||r.path)} <span class="quiet">${esc(r.path)}</span></button>`).join('')
+    : '<div class="quiet">none</div>';
+  const waitEl = document.getElementById('github-projects-wait');
+  const gl = document.getElementById('github-repo-list');
+  if (typeof p.github === 'string') {
+    waitEl.innerHTML = '<div class="wait">'+esc(p.github)+'</div>';
+    gl.innerHTML = '';
+    return;
+  }
+  waitEl.innerHTML = '';
+  const repos = Array.isArray(p.github) ? p.github : [];
+  gl.innerHTML = repos.length
+    ? repos.map(s => `<button type="button" class="recent" data-repo="${esc(s)}">${esc(s)}</button>`).join('')
+    : '<div class="quiet">none</div>';
+}
+
+document.getElementById('add-worker').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const name = String(fd.get('name')||'').trim();
+  await j('/api/workers', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ name, peer: name, backend: fd.get('backend'), model: fd.get('model')||'', github_skills: fd.get('github_skills') ? '1' : '0' }) });
+  e.target.reset();
+  refresh();
+});
+document.getElementById('worker-roster').addEventListener('change', async (e) => {
+  const form = e.target.closest('form');
+  if (!form) return;
+  const fd = new FormData(form);
+  if (form.classList.contains('skills')) {
+    await fetch(form.action, { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ enabled: fd.get('enabled') ? '1' : '0' }) });
+  } else {
+    await fetch(form.action, { method:'POST', body: new URLSearchParams(fd) });
+  }
+  refresh();
+});
+document.getElementById('github-connect').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  await j('/api/github/connect', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ owner: fd.get('owner'), name: fd.get('name'), branch: fd.get('branch'), token: fd.get('token') }) });
+  refresh();
+});
+document.getElementById('github-merge').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (document.getElementById('merge-btn').disabled) return;
+  await j('/api/github/merge', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ parent: document.getElementById('merge-parent').value }) });
+  refresh();
+});
+document.getElementById('github-search').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const data = await j('/api/github/search?kind='+encodeURIComponent(fd.get('kind'))+'&q='+encodeURIComponent(fd.get('q')));
+  renderList(document.getElementById('github-search-results'), data, it =>
+    `<div class="gh-line">${esc(it.name||it.path||it.title||it.html_url||'')}</div>`);
+});
+document.getElementById('github-file').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const data = await j('/api/github/file?path='+encodeURIComponent(fd.get('path')));
+  const el = document.getElementById('github-file-body');
+  if (data.WAIT) { el.innerHTML = '<div class="wait">'+esc(data.WAIT)+'</div>'; return; }
+  const name = data.name || data.path || fd.get('path');
+  const content = data.content ? atob(data.content.replace(/\\n/g,'')) : (data.ok ? 'ok' : '');
+  const arr = asList(data);
+  if (arr) { renderList(el, data, it => `<div class="gh-line">${esc(it.name||it.path||'')}</div>`); return; }
+  el.innerHTML = `<div class="gh-line">${esc(name)}</div><div class="file-peek">${esc((content||'').slice(0,2000))}</div>`;
+});
+document.getElementById('github-pulls').addEventListener('click', (e) => {
+  const row = e.target.closest('.pull');
+  if (!row) return;
+  selectedPull = row.getAttribute('data-n');
+  refreshGithub();
+});
+document.getElementById('composer').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const input = document.getElementById('steer-input');
+  const text = input.value.trim();
+  if (!text) return;
+  await j('/api/steer', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text }) });
+  input.value = '';
+  refreshSteer();
+  refresh();
+});
+document.getElementById('steer-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    document.getElementById('composer').requestSubmit();
+  }
+});
+document.getElementById('project-switcher').addEventListener('click', () => {
+  const pal = document.getElementById('project-palette');
+  pal.hidden = !pal.hidden;
+  document.getElementById('project-switcher').setAttribute('aria-expanded', pal.hidden ? 'false' : 'true');
+});
+document.getElementById('tab-local').addEventListener('click', () => {
+  document.getElementById('tab-local').classList.add('on');
+  document.getElementById('tab-github').classList.remove('on');
+  document.getElementById('pane-local').hidden = false;
+  document.getElementById('pane-github').hidden = true;
+});
+document.getElementById('tab-github').addEventListener('click', () => {
+  document.getElementById('tab-github').classList.add('on');
+  document.getElementById('tab-local').classList.remove('on');
+  document.getElementById('pane-local').hidden = true;
+  document.getElementById('pane-github').hidden = false;
+});
+document.getElementById('open-folder').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const path = new FormData(e.target).get('path');
+  await j('/api/project/open', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ kind: 'local', path }) });
+  document.getElementById('project-palette').hidden = true;
+  refresh();
+});
+document.getElementById('recents').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-path]');
+  if (!b) return;
+  await j('/api/project/open', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ kind: 'local', path: b.getAttribute('data-path') }) });
+  document.getElementById('project-palette').hidden = true;
+  refresh();
+});
+document.getElementById('github-repo-list').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-repo]');
+  if (!b) return;
+  await j('/api/project/open', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ kind: 'github', repo: b.getAttribute('data-repo') }) });
+  document.getElementById('project-palette').hidden = true;
+  refresh();
+});
+document.getElementById('github-connect-picker').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  await j('/api/github/connect', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ owner: fd.get('owner'), name: fd.get('name'), token: fd.get('token') }) });
+  refreshProject();
+});
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
