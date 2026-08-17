@@ -6,7 +6,8 @@
 //! from store + outbox. One unread assign per peer inbox; a second distinct
 //! assign stays outbox-only (same filename may overwrite on bounce). Peer,
 //! mail-name, and mailbox-root amplification (`..`, UNC, drive-letter, control
-//! bytes) stays outbox-only. Unit tests never need a live Windows mailbox.
+//! bytes, Windows reserved devices) stays outbox-only. An unread assign is
+//! HOLD, not PASS. Unit tests never need a live Windows mailbox.
 //! This adapter never writes `C:\TextPCB Platform`. It is not a fifth product.
 //! A mailbox handoff is Evidence; this file cannot CLOSE a parent.
 
@@ -45,6 +46,10 @@ pub const FIFTH_PRODUCT: bool = false;
 /// Mailbox reply / handoff is Evidence. This adapter cannot CLOSE a parent.
 pub const HANDOFF_IS_EVIDENCE: &str =
     "handoff/mailbox reply is Evidence; cannot CLOSE or mark VERIFIED";
+
+/// Unread assign is HOLD. Observation is not QA PASS and cannot CLOSE.
+pub const HOLD_UNREAD: &str =
+    "HOLD: unread assign in flight; not PASS; handoff is Evidence; cannot CLOSE";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssignRecord {
@@ -93,6 +98,13 @@ pub struct MailboxObservation {
     pub outbox_count: usize,
 }
 
+impl MailboxObservation {
+    /// True when any peer still has an unread assign. HOLD, not PASS.
+    pub fn hold_in_flight(&self) -> bool {
+        self.peers.iter().any(|p| p.latest_assign.is_some())
+    }
+}
+
 /// Windows mailbox default when `SHOP_MAILBOX` is unset. Not Platform.
 pub const WINDOWS_MAILBOX_DEFAULT: &str = r"C:\Users\jetga\.textpcb-agent-bridge";
 
@@ -116,13 +128,49 @@ fn mailbox_forbidden(root: &Path) -> bool {
     is_forbidden_project(root) || mailbox_root_amplified(root)
 }
 
-/// Absolute, UNC, drive-letter, `..`, or control bytes. Not a peer or mail name.
+/// Windows device names (`CON`, `NUL`, …). Creating `inbox/CON` is not a peer.
+fn windows_reserved_device(raw: &str) -> bool {
+    let t = raw
+        .trim()
+        .trim_end_matches(['.', ' '])
+        .to_ascii_lowercase();
+    matches!(
+        t.as_str(),
+        "con"
+            | "prn"
+            | "aux"
+            | "nul"
+            | "com1"
+            | "com2"
+            | "com3"
+            | "com4"
+            | "com5"
+            | "com6"
+            | "com7"
+            | "com8"
+            | "com9"
+            | "lpt1"
+            | "lpt2"
+            | "lpt3"
+            | "lpt4"
+            | "lpt5"
+            | "lpt6"
+            | "lpt7"
+            | "lpt8"
+            | "lpt9"
+    )
+}
+
+/// Absolute, UNC, drive-letter, `..`, reserved device, or control bytes.
 fn peer_or_name_refused_raw(raw: &str) -> bool {
     if raw.as_bytes().iter().any(|&b| b < 0x20 || b == 0x7f) {
         return true;
     }
     let t = raw.trim();
     if t.is_empty() || t == "." || t == ".." {
+        return true;
+    }
+    if windows_reserved_device(t) {
         return true;
     }
     if t.starts_with('/') || t.starts_with('\\') {
@@ -681,6 +729,9 @@ mod tests {
         assert!(!ONE_ASSIGN_IN_FLIGHT.contains("workers.rs"));
         assert!(HANDOFF_IS_EVIDENCE.contains("Evidence"));
         assert!(HANDOFF_IS_EVIDENCE.contains("cannot CLOSE"));
+        assert!(HOLD_UNREAD.contains("HOLD"));
+        assert!(HOLD_UNREAD.contains("not PASS"));
+        assert!(!HOLD_UNREAD.contains("workers.rs"));
     }
 
     #[test]
@@ -822,6 +873,80 @@ mod tests {
         assert!(v.get("verified").is_none());
         assert!(v.get("status").is_none());
         assert!(!HANDOFF_IS_EVIDENCE.contains("PASS"));
+        assert!(!ok.hold_in_flight());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn observe_unread_assign_is_hold_not_pass() {
+        let dir = scratch("hold-unread");
+        let outbox = dir.join("outbox");
+        fs::create_dir_all(&outbox).unwrap();
+        let mailbox = dir.join("bridge");
+        fs::create_dir_all(mailbox.join("inbox")).unwrap();
+        let rec = AssignRecord::from_child(DEFAULT_FROM, &child("c1", "alice"));
+        assert_eq!(
+            write_assign(&outbox, Some(&mailbox), "P", &rec)
+                .unwrap()
+                .len(),
+            2
+        );
+        let ok = observe(Some(&mailbox), &outbox);
+        assert!(ok.present && ok.inbox_present);
+        assert!(ok.wait.is_none());
+        assert!(ok.hold_in_flight());
+        assert_eq!(ok.unread_total, 1);
+        let v = serde_json::to_value(&ok).unwrap();
+        assert!(v.get("pass").is_none());
+        assert!(v.get("verified").is_none());
+        assert!(v.get("status").is_none());
+        assert!(HOLD_UNREAD.contains("not PASS"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_assign_rejects_windows_reserved_peers() {
+        let dir = scratch("reserved-peer");
+        let outbox = dir.join("outbox");
+        let mailbox = dir.join("bridge");
+        fs::create_dir_all(mailbox.join("inbox")).unwrap();
+        for peer in ["CON", "nul", "COM1", "lpt1.", "PRN"] {
+            let rec = AssignRecord::from_child(DEFAULT_FROM, &child("c1", peer));
+            let written = write_assign(&outbox, Some(&mailbox), "P", &rec).unwrap();
+            assert_eq!(written.len(), 1, "peer {peer} must stay outbox-only");
+            assert!(!mailbox.join("inbox").join(peer).exists());
+        }
+        assert_eq!(
+            fs::read_dir(mailbox.join("inbox"))
+                .unwrap()
+                .flatten()
+                .count(),
+            0
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_assign_rejects_amplified_parent_id() {
+        let dir = scratch("amp-parent");
+        let outbox = dir.join("outbox");
+        let mailbox = dir.join("bridge");
+        fs::create_dir_all(mailbox.join("inbox")).unwrap();
+        let rec = AssignRecord::from_child(DEFAULT_FROM, &child("c1", "alice"));
+        let written = write_assign(&outbox, Some(&mailbox), "../secret", &rec).unwrap();
+        assert_eq!(written.len(), 1);
+        assert!(outbox.join("assign-___secret-c1.json").is_file());
+        assert!(!mailbox.join("inbox/alice").exists());
+        assert!(!dir.join("secret").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_mailbox_refuses_control_bytes() {
+        let store = PathBuf::from("/tmp/shop-store-mb-ctrl");
+        let bad = PathBuf::from("/tmp/bridge\nroot");
+        assert_eq!(resolve_mailbox(Some(bad), &store), store.join("mailbox"));
+        let tab = PathBuf::from("/tmp/bridge\troot");
+        assert_eq!(resolve_mailbox(Some(tab), &store), store.join("mailbox"));
     }
 }
