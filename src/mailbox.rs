@@ -2,11 +2,12 @@
 //!
 //! Assign JSON always lands in `.shop/outbox/` (durable). If a mailbox root is
 //! present and not forbidden, the same record is also written to `inbox/<peer>/`.
-//! If the mailbox is down, forbidden, or inbox is missing, assign still succeeds
 //! from store + outbox. One unread assign per peer inbox; a second distinct
-//! assign stays outbox-only (same filename may overwrite on bounce). Unit tests
-//! never need a live Windows mailbox. This adapter never writes
-//! `C:\TextPCB Platform`. It is not a fifth product.
+//! assign stays outbox-only (same filename may overwrite on bounce). Peer,
+//! mail-name, and mailbox-root amplification (`..`, UNC, drive-letter, control
+//! bytes) stays outbox-only. Unit tests never need a live Windows mailbox.
+//! This adapter never writes `C:\TextPCB Platform`. It is not a fifth product.
+//! A mailbox handoff is Evidence; this file cannot CLOSE a parent.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -39,6 +40,10 @@ pub const ONE_ASSIGN_IN_FLIGHT: &str =
 
 /// This file is the mailbox adapter. It does not invent a fifth product.
 pub const FIFTH_PRODUCT: bool = false;
+
+/// Mailbox reply / handoff is Evidence. This adapter cannot CLOSE a parent.
+pub const HANDOFF_IS_EVIDENCE: &str =
+    "handoff/mailbox reply is Evidence; cannot CLOSE or mark VERIFIED";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssignRecord {
@@ -94,9 +99,85 @@ fn store_mailbox(store_root: &Path) -> PathBuf {
     store_root.join("mailbox")
 }
 
-/// True when a mailbox root would write Platform or otherwise leave the adapter.
+/// UNC or control bytes in a mailbox root. Drive-letter Windows paths stay
+/// allowed (`WINDOWS_MAILBOX_DEFAULT`). This is not an AASM path type.
+fn mailbox_root_amplified(root: &Path) -> bool {
+    let raw = root.to_string_lossy();
+    if raw.as_bytes().iter().any(|&b| b < 0x20 || b == 0x7f) {
+        return true;
+    }
+    let t = raw.trim();
+    t.starts_with("\\\\") || t.starts_with("//")
+}
+
+/// True when a mailbox root would write Platform, UNC, or otherwise leave the adapter.
 fn mailbox_forbidden(root: &Path) -> bool {
-    is_forbidden_project(root)
+    is_forbidden_project(root) || mailbox_root_amplified(root)
+}
+
+/// Absolute, UNC, drive-letter, `..`, or control bytes. Not a peer or mail name.
+fn peer_or_name_refused_raw(raw: &str) -> bool {
+    if raw.as_bytes().iter().any(|&b| b < 0x20 || b == 0x7f) {
+        return true;
+    }
+    let t = raw.trim();
+    if t.is_empty() || t == "." || t == ".." {
+        return true;
+    }
+    if t.starts_with('/') || t.starts_with('\\') {
+        return true;
+    }
+    if t.contains("..") || t.contains('/') || t.contains('\\') {
+        return true;
+    }
+    let b = t.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+}
+
+fn sanitize_mail_token(token: &str) -> Option<&str> {
+    let t = token.trim();
+    if peer_or_name_refused_raw(t) {
+        return None;
+    }
+    if !t
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return None;
+    }
+    Some(t)
+}
+
+fn slug_token(token: &str) -> String {
+    let s: String = token
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if s.is_empty() || s == "." || s == ".." {
+        "_".into()
+    } else {
+        s
+    }
+}
+
+/// Safe assign filename. `inbox_ok` is false when parent/lane would amplify.
+fn safe_assign_name(parent_id: &str, lane_id: &str) -> (String, bool) {
+    match (
+        sanitize_mail_token(parent_id),
+        sanitize_mail_token(lane_id),
+    ) {
+        (Some(p), Some(l)) => (format!("assign-{p}-{l}.json"), true),
+        _ => (
+            format!("assign-{}-{}.json", slug_token(parent_id), slug_token(lane_id)),
+            false,
+        ),
+    }
 }
 
 /// `--mailbox` > `SHOP_MAILBOX` > Windows default > `{store}/mailbox` (tests/linux).
@@ -132,10 +213,10 @@ pub fn resolve_mailbox(explicit: Option<PathBuf>, store_root: &Path) -> PathBuf 
 }
 
 /// Peer inbox is a single filename-safe token under `inbox/`. Rejects `read`,
-/// `..`, separators, and anything that would walk out of the mailbox root.
+/// `..`, UNC, drive-letter, separators, and anything that would walk out.
 fn sanitize_peer(peer: &str) -> Option<&str> {
     let t = peer.trim();
-    if t.is_empty() || t == "read" || t == "." || t == ".." {
+    if t == "read" || peer_or_name_refused_raw(t) {
         return None;
     }
     if !t
@@ -198,7 +279,7 @@ pub fn write_assign(
     parent_id: &str,
     record: &AssignRecord,
 ) -> Result<Vec<PathBuf>> {
-    let name = format!("assign-{parent_id}-{}.json", record.lane_id);
+    let (name, inbox_ok) = safe_assign_name(parent_id, &record.lane_id);
     let mut written = Vec::new();
 
     // Durable path: always record in the shop outbox even if the mailbox is down.
@@ -208,11 +289,13 @@ pub fn write_assign(
     write_json_atomic(&out_path, record)?;
     written.push(out_path);
 
-    if let Some(root) = mailbox {
-        // One assign in flight: a distinct unread assign stays outbox-only.
-        if !inbox_has_other_assign(root, &record.to, &name) {
-            if let Some(mail_path) = try_write_inbox(root, &record.to, &name, record) {
-                written.push(mail_path);
+    if inbox_ok {
+        if let Some(root) = mailbox {
+            // One assign in flight: a distinct unread assign stays outbox-only.
+            if !inbox_has_other_assign(root, &record.to, &name) {
+                if let Some(mail_path) = try_write_inbox(root, &record.to, &name, record) {
+                    written.push(mail_path);
+                }
             }
         }
     }
@@ -306,12 +389,8 @@ pub fn observe(mailbox: Option<&Path>, outbox: &Path) -> MailboxObservation {
         );
     }
     if !root.exists() {
-        return wait_obs(
-            Some(root_s),
-            false,
-            format!("WAIT: mailbox directory missing at {root_s}"),
-            outbox_count,
-        );
+        let wait = format!("WAIT: mailbox directory missing at {root_s}");
+        return wait_obs(Some(root_s), false, wait, outbox_count);
     }
     let inbox = root.join("inbox");
     if !inbox.is_dir() {
@@ -599,6 +678,8 @@ mod tests {
         assert!(!FIFTH_PRODUCT);
         assert!(ONE_ASSIGN_IN_FLIGHT.contains("one unread assign"));
         assert!(!ONE_ASSIGN_IN_FLIGHT.contains("workers.rs"));
+        assert!(HANDOFF_IS_EVIDENCE.contains("Evidence"));
+        assert!(HANDOFF_IS_EVIDENCE.contains("cannot CLOSE"));
     }
 
     #[test]
@@ -667,6 +748,79 @@ mod tests {
         let written = write_assign(&outbox, Some(&mailbox), "P", &rec).unwrap();
         assert_eq!(written.len(), 1);
         assert!(!mailbox.join("inbox/read").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_assign_rejects_unc_and_drive_letter_peers() {
+        let dir = scratch("unc-peer");
+        let outbox = dir.join("outbox");
+        let mailbox = dir.join("bridge");
+        fs::create_dir_all(mailbox.join("inbox")).unwrap();
+        for peer in ["//server/share", r"\\server\share", "C:alice", "/alice", r"\alice"] {
+            let rec = AssignRecord::from_child(DEFAULT_FROM, &child("c1", peer));
+            let written = write_assign(&outbox, Some(&mailbox), "P", &rec).unwrap();
+            assert_eq!(written.len(), 1, "peer {peer} must stay outbox-only");
+        }
+        assert_eq!(
+            fs::read_dir(mailbox.join("inbox"))
+                .unwrap()
+                .flatten()
+                .count(),
+            0
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_assign_rejects_amplified_lane_id() {
+        let dir = scratch("amp-lane");
+        let outbox = dir.join("outbox");
+        let mailbox = dir.join("bridge");
+        fs::create_dir_all(mailbox.join("inbox")).unwrap();
+        let rec = AssignRecord::from_child(DEFAULT_FROM, &child("../secret", "alice"));
+        let written = write_assign(&outbox, Some(&mailbox), "P", &rec).unwrap();
+        assert_eq!(written.len(), 1);
+        assert!(outbox.join("assign-P-__secret.json").is_file());
+        assert!(!mailbox.join("inbox/alice").exists());
+        assert!(!dir.join("secret").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_mailbox_refuses_unc() {
+        let store = PathBuf::from("/tmp/shop-store-mb-unc");
+        assert_eq!(
+            resolve_mailbox(Some(PathBuf::from("//server/share")), &store),
+            store.join("mailbox")
+        );
+        assert_eq!(
+            resolve_mailbox(Some(PathBuf::from(r"\\server\share")), &store),
+            store.join("mailbox")
+        );
+        assert_eq!(
+            resolve_mailbox(Some(PathBuf::from(r"C:\Users\jetga\.textpcb-agent-bridge")), &store),
+            PathBuf::from(r"C:\Users\jetga\.textpcb-agent-bridge")
+        );
+    }
+
+    #[test]
+    fn observe_handoff_is_evidence_not_pass() {
+        let dir = scratch("handoff-ev");
+        let outbox = dir.join("outbox");
+        fs::create_dir_all(&outbox).unwrap();
+        let root = dir.join("bridge");
+        fs::create_dir_all(root.join("inbox/alice")).unwrap();
+        fs::write(root.join("inbox/alice/handoff-c1.json"), "{}").unwrap();
+        let ok = observe(Some(&root), &outbox);
+        assert!(ok.present && ok.inbox_present);
+        assert!(ok.wait.is_none());
+        assert_eq!(ok.peers[0].latest_handoff.as_deref(), Some("handoff-c1.json"));
+        let v = serde_json::to_value(&ok).unwrap();
+        assert!(v.get("pass").is_none());
+        assert!(v.get("verified").is_none());
+        assert!(v.get("status").is_none());
+        assert!(!HANDOFF_IS_EVIDENCE.contains("PASS"));
         let _ = fs::remove_dir_all(&dir);
     }
 }
