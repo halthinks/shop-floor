@@ -1,0 +1,329 @@
+/* Planner train-of-thought. Scoped to #planner-feed so the box can sit
+   at the top of a host page. No invented activity — empty rails stay WAIT. */
+
+.planner-feed-page {
+  margin: 0;
+  min-height: 100%;
+  background: #07080b;
+  color: #fafafa;
+}
+
+#planner-feed.planner-feed {
+  --pf-bg: #07080b;
+  --pf-panel: #0c0e13;
+  --pf-ink: #f4f4f5;
+  --pf-muted: #8b8d97;
+  --pf-line: rgba(255, 255, 255, 0.08);
+  --pf-ice: #7dd3fc;
+  --pf-celadon: #6ee7b7;
+  --pf-champagne: #f5d0a0;
+  --pf-thought: #9ad8ff;
+  --pf-action: #f3c27a;
+  box-sizing: border-box;
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  color: var(--pf-ink);
+  background:
+    linear-gradient(180deg, rgba(125, 211, 252, 0.06), transparent 42%),
+    var(--pf-panel);
+  border-bottom: 1px solid var(--pf-line);
+  box-shadow:
+    0 1px 0 rgba(125, 211, 252, 0.18),
+    0 18px 40px rgba(0, 0, 0, 0.35);
+  font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+#planner-feed.planner-feed *,
+#planner-feed.planner-feed *::before,
+#planner-feed.planner-feed *::after {
+  box-sizing: border-box;
+}
+
+#planner-feed.planner-feed::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent 2px,
+    rgba(255, 255, 255, 0.015) 2px,
+    rgba(255, 255, 255, 0.015) 3px
+  );
+  animation: planner-feed-scan 7s linear infinite;
+  opacity: 0.55;
+}
+
+#planner-feed.planner-feed::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--pf-ice), var(--pf-celadon), transparent);
+  opacity: 0.7;
+}
+
+.planner-feed__bar {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  padding: 10px 18px 8px;
+}
+
+.planner-feed__identity {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.planner-feed__mark {
+  font-size: 15px;
+  font-weight: 560;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--pf-ink);
+}
+
+.planner-feed__role {
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--pf-ice);
+}
+
+.planner-feed__lede {
+  margin: 0;
+  color: var(--pf-muted);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+
+.planner-feed__status {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 18px;
+  color: var(--pf-champagne);
+  font-size: 11px;
+  font-weight: 560;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.planner-feed__pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--pf-champagne);
+  box-shadow: 0 0 0 0 rgba(245, 208, 160, 0.55);
+  animation: planner-feed-wait-pulse 1.8s ease-out infinite;
+}
+
+.planner-feed__status[data-state="live"] {
+  color: var(--pf-celadon);
+}
+
+.planner-feed__status[data-state="live"] .planner-feed__pulse {
+  background: var(--pf-celadon);
+  box-shadow: 0 0 10px rgba(110, 231, 183, 0.7);
+  animation: planner-feed-live-pulse 1.4s ease-in-out infinite;
+}
+
+.planner-feed__ticker {
+  position: relative;
+  height: 28px;
+  margin: 0 18px 6px;
+  overflow: hidden;
+  border-top: 1px solid var(--pf-line);
+  border-bottom: 1px solid var(--pf-line);
+  mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent);
+}
+
+.planner-feed__ticker[hidden] {
+  display: none;
+}
+
+.planner-feed__ticker-track {
+  display: flex;
+  align-items: center;
+  gap: 48px;
+  width: max-content;
+  height: 100%;
+  padding-right: 48px;
+  animation: planner-feed-crawl 32s linear infinite;
+}
+
+.planner-feed__ticker:hover .planner-feed__ticker-track {
+  animation-play-state: paused;
+}
+
+.planner-feed__tick {
+  white-space: nowrap;
+  font: 12px/1.2 ui-monospace, "SF Mono", "IBM Plex Mono", Menlo, Consolas, monospace;
+  color: var(--pf-ink);
+  letter-spacing: 0.01em;
+}
+
+.planner-feed__tick em {
+  font-style: normal;
+  margin-right: 8px;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.planner-feed__tick--thought em { color: var(--pf-thought); }
+.planner-feed__tick--action em { color: var(--pf-action); }
+
+.planner-feed__rails {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  min-height: 118px;
+}
+
+.planner-feed__rail {
+  min-width: 0;
+  padding: 4px 18px 12px;
+}
+
+.planner-feed__rail + .planner-feed__rail {
+  border-left: 1px solid var(--pf-line);
+}
+
+.planner-feed__rail h2 {
+  margin: 0 0 6px;
+  font-size: 10px;
+  font-weight: 560;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--pf-muted);
+}
+
+.planner-feed__rail[data-kind="thoughts"] h2 { color: var(--pf-thought); }
+.planner-feed__rail[data-kind="actions"] h2 { color: var(--pf-action); }
+
+.planner-feed__viewport {
+  position: relative;
+  height: 96px;
+  overflow: hidden;
+  mask-image: linear-gradient(180deg, #000 0%, #000 62%, transparent 100%);
+}
+
+.planner-feed__train {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.planner-feed__train.is-streaming {
+  animation: planner-feed-roll 22s linear infinite;
+}
+
+.planner-feed__viewport:hover .planner-feed__train.is-streaming {
+  animation-play-state: paused;
+}
+
+.planner-feed__item {
+  display: grid;
+  grid-template-columns: 52px 1fr;
+  gap: 10px;
+  align-items: start;
+  margin: 0;
+  padding: 0 0 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.planner-feed__item--bare {
+  grid-template-columns: 1fr;
+}
+
+.planner-feed__item.is-fresh {
+  animation: planner-feed-rise 0.55s ease-out, planner-feed-flash 1.2s ease-out;
+}
+
+.planner-feed__item time {
+  color: var(--pf-muted);
+  font: 11px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  letter-spacing: 0.04em;
+}
+
+.planner-feed__item p {
+  margin: 0;
+  color: var(--pf-ink);
+  font: 13px/1.4 ui-monospace, "SF Mono", "IBM Plex Mono", Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.planner-feed__rail[data-kind="thoughts"] .planner-feed__item p {
+  color: #d7eefc;
+}
+
+.planner-feed__rail[data-kind="actions"] .planner-feed__item p {
+  color: #f6e3c4;
+}
+
+.planner-feed__wait {
+  margin: 10px 0 0;
+  color: var(--pf-champagne);
+  font: 12px/1.45 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  letter-spacing: 0.02em;
+}
+
+@keyframes planner-feed-scan {
+  from { transform: translateY(0); }
+  to { transform: translateY(3px); }
+}
+
+@keyframes planner-feed-crawl {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+@keyframes planner-feed-roll {
+  from { transform: translateY(0); }
+  to { transform: translateY(-50%); }
+}
+
+@keyframes planner-feed-rise {
+  from { transform: translateY(-10px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes planner-feed-flash {
+  0% { background: rgba(125, 211, 252, 0.12); }
+  100% { background: transparent; }
+}
+
+@keyframes planner-feed-wait-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(245, 208, 160, 0.45); }
+  70% { box-shadow: 0 0 0 8px rgba(245, 208, 160, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(245, 208, 160, 0); }
+}
+
+@keyframes planner-feed-live-pulse {
+  0%, 100% { opacity: 0.65; }
+  50% { opacity: 1; }
+}
+
+@media (max-width: 720px) {
+  .planner-feed__rails { grid-template-columns: 1fr; }
+  .planner-feed__rail + .planner-feed__rail {
+    border-left: 0;
+    border-top: 1px solid var(--pf-line);
+  }
+  .planner-feed__lede { display: none; }
+}
