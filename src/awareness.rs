@@ -116,6 +116,11 @@ pub struct Awareness {
 }
 
 impl WorkerView {
+    /// Working only when a Working pid was observed. Roster/handoff/dead are not.
+    pub fn is_observed_working(&self) -> bool {
+        self.pid_liveness == Some(PidLiveness::Working)
+    }
+
     pub fn from_worker(
         w: Worker,
         parents: &[ParentView],
@@ -222,6 +227,12 @@ impl Awareness {
     pub fn working_worker_count(&self) -> usize {
         observed_working_workers(&self.workers)
     }
+
+    /// Store waits plus exact GitHub-count and assigned-job-pid gaps.
+    /// Does not invent zeros. Does not drop an already-recorded WAIT.
+    pub fn merge_waits(&self, processes: &[LiveProcess]) -> Vec<String> {
+        merge_truth_waits(&self.waits, &self.github, &self.jobs(processes))
+    }
 }
 
 /// Observed live-job count. Length of the observed vec, never a guess.
@@ -233,8 +244,34 @@ pub fn observed_job_count(jobs: &[JobView]) -> usize {
 pub fn observed_working_workers(workers: &[WorkerView]) -> usize {
     workers
         .iter()
-        .filter(|w| w.pid_liveness == Some(PidLiveness::Working))
+        .filter(|w| w.is_observed_working())
         .count()
+}
+
+/// Jobs whose bound pid is Working. Assigned-without-pid is not working.
+pub fn observed_working_jobs(jobs: &[JobView]) -> usize {
+    jobs.iter()
+        .filter(|j| j.pid_liveness == Some(PidLiveness::Working))
+        .count()
+}
+
+/// Recorded waits plus GitHub-count and assigned-job-pid gaps. Never invents 0.
+pub fn merge_truth_waits(
+    recorded: &[String],
+    github: &GitHubAwareness,
+    jobs: &[JobView],
+) -> Vec<String> {
+    let mut waits = recorded.to_vec();
+    for wait in github
+        .count_waits()
+        .into_iter()
+        .chain(job_pid_waits(jobs))
+    {
+        if !waits.iter().any(|existing| existing == &wait) {
+            waits.push(wait);
+        }
+    }
+    waits
 }
 
 /// Assigned jobs with no observed pid. Does not invent a working count.
@@ -422,15 +459,9 @@ pub fn classify_action(
         .any(|(_, c)| matches!(c.state, ChildState::Bounced));
     let inbox = mailbox.peers.iter().find(|p| p.peer == peer);
     let unread = inbox.map(|p| p.unread).unwrap_or(0);
-
-    if has_bounced {
-        return (
-            "bounced".into(),
-            Some("child bounced; same peer/paths".into()),
-            unread,
-        );
-    }
     let latest_pid = latest_process_for_peer(peer, processes);
+
+    // Observed Working pid wins. Bounce is store state, not a live process.
     if let Some(proc) = latest_pid {
         if proc.liveness == PidLiveness::Working {
             return (
@@ -439,6 +470,13 @@ pub fn classify_action(
                 unread,
             );
         }
+    }
+    if has_bounced {
+        return (
+            "bounced".into(),
+            Some("child bounced; same peer/paths".into()),
+            unread,
+        );
     }
     if has_assigned {
         return ("assigned".into(), Some("child ASSIGNED".into()), unread);
@@ -684,6 +722,102 @@ mod tests {
         assert_eq!(view.pid, Some(42));
         assert_eq!(view.action, "working");
         assert_eq!(observed_working_workers(&[view]), 1);
+    }
+
+    #[test]
+    fn bounced_without_pid_is_bounced_not_working() {
+        let parents = vec![parent_with_child(ChildState::Bounced)];
+        let (action, reason, _) = classify_action("alice", &parents, &empty_mail(), &[]);
+        assert_eq!(action, "bounced");
+        assert_ne!(action, "working");
+        assert!(reason.unwrap().contains("bounced"));
+        let jobs = live_jobs(&parents, &[]);
+        assert_eq!(jobs[0].action, "bounced");
+        assert_eq!(jobs[0].pid, None);
+    }
+
+    #[test]
+    fn working_pid_wins_over_bounced_child() {
+        let parents = vec![parent_with_child(ChildState::Bounced)];
+        let processes = vec![proc("alice", PidLiveness::Working, 2)];
+        let (action, reason, _) = classify_action("alice", &parents, &empty_mail(), &processes);
+        assert_eq!(action, "working");
+        assert!(reason.unwrap().contains("live pid 42"));
+        let jobs = live_jobs(&parents, &processes);
+        assert_eq!(jobs[0].action, "working");
+        assert_eq!(jobs[0].pid, Some(42));
+        assert_eq!(observed_working_jobs(&jobs), 1);
+        let view = WorkerView::from_worker(worker("alice"), &parents, &empty_mail(), &processes);
+        assert!(view.is_observed_working());
+    }
+
+    #[test]
+    fn unread_mailbox_without_job_is_wait_not_working() {
+        let mailbox = mail(vec![PeerInbox {
+            peer: "alice".into(),
+            unread: 2,
+            latest_assign: None,
+            latest_handoff: Some("handoff.json".into()),
+        }]);
+        let (action, reason, unread) = classify_action("alice", &[], &mailbox, &[]);
+        assert_eq!(action, "wait");
+        assert_ne!(action, "working");
+        assert_eq!(unread, 2);
+        assert!(reason.unwrap().contains("unread mailbox"));
+    }
+
+    #[test]
+    fn present_inbox_without_unread_is_live_not_working() {
+        let mailbox = mail(vec![PeerInbox {
+            peer: "alice".into(),
+            unread: 0,
+            latest_assign: None,
+            latest_handoff: None,
+        }]);
+        let (action, _, unread) = classify_action("alice", &[], &mailbox, &[]);
+        assert_eq!(action, "live");
+        assert_ne!(action, "working");
+        assert_eq!(unread, 0);
+    }
+
+    #[test]
+    fn merge_waits_keeps_gaps_and_never_invents_zero() {
+        let parents = vec![parent_with_child(ChildState::Assigned)];
+        let github = GitHubAwareness {
+            repo: None,
+            default_branch: None,
+            authenticated: false,
+            token_present: false,
+            wait: Some("WAIT: GitHub repo not connected".into()),
+            checks: Value::Null,
+            issue_count: None,
+            pr_count: None,
+            check_count: None,
+        };
+        let awareness = Awareness {
+            store_ok: true,
+            project: ProjectView {
+                name: "shop".into(),
+                path: ".".into(),
+                store: ".shop".into(),
+            },
+            workers: Vec::new(),
+            claims: Vec::new(),
+            parents: parents.clone(),
+            mailbox: empty_mail(),
+            github,
+            events: Vec::new(),
+            waits: vec!["WAIT: mailbox down".into()],
+        };
+        let merged = awareness.merge_waits(&[]);
+        assert!(merged.iter().any(|w| w.contains("mailbox down")));
+        assert!(merged.iter().any(|w| w.contains("issue_count")));
+        assert!(merged.iter().any(|w| w.contains("P/c1")));
+        assert!(merged.iter().all(|w| w.contains("WAIT")));
+        assert!(merged.iter().any(|w| w.contains("not invented as 0")));
+        assert_eq!(format_observed_count(None), "WAIT");
+        assert_ne!(format_observed_count(None), "0");
+        assert_eq!(observed_working_jobs(&awareness.jobs_from_store()), 0);
     }
 
     #[test]
