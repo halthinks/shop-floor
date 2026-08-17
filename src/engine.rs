@@ -29,10 +29,11 @@ use crate::memory::{MemoryTier, ShopMemory};
 use crate::paths::{parse_paths, paths_overlap};
 use crate::procwait::{self, LiveProcess, ProcWaitLedger, ProcessBind, StopRecord, WaitEvidence};
 use crate::project::{
-    default_recents_path, format_recents, load_recents, origin_github_slug, project_name,
-    project_root_from_store, recent_path_for_repo, record_recent, refuse_platform,
+    default_recents_path, format_recents, is_forbidden_project, load_recents, origin_github_slug,
+    project_name, project_root_from_store, recent_path_for_repo, record_recent, refuse_platform,
     slugs_from_github_search, store_dir_for, touch_recent_github,
 };
+use crate::proving;
 use crate::skills::{GitHubSkills, NullGitHub};
 use crate::steer::{parse_steer, steer_to_supergrok, SteerLine, SteerVerb};
 use crate::store::Store;
@@ -417,7 +418,11 @@ impl Shop {
                 if !self.github.authenticated() {
                     return Some("WAIT: no GitHub auth to read checks".into());
                 }
-                let n = parent.github_pr_number.unwrap_or(0);
+                let Some(n) = parent.github_pr_number.filter(|n| *n > 0) else {
+                    return Some(
+                        "WAIT: PR URL without a real pull number; never fake checks".into(),
+                    );
+                };
                 match self.github.invoke(
                     "pulls.read",
                     json!({
@@ -427,25 +432,7 @@ impl Shop {
                         "method": "get_check_runs",
                     }),
                 ) {
-                    Ok(v) => {
-                        let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
-                        let runs_pass = v
-                            .get("check_runs")
-                            .and_then(|a| a.as_array())
-                            .map(|runs| {
-                                !runs.is_empty()
-                                    && runs.iter().any(|x| {
-                                        x.get("conclusion").and_then(|c| c.as_str())
-                                            == Some("success")
-                                    })
-                            })
-                            .unwrap_or(false);
-                        if status == "success" || runs_pass {
-                            None
-                        } else {
-                            Some("WAIT: missing or failing GitHub checks".into())
-                        }
-                    }
+                    Ok(v) => github_checks_wait(&v),
                     Err(e) => Some(format!("WAIT: {e}")),
                 }
             }
@@ -466,12 +453,14 @@ impl Shop {
         paths_csv: &str,
     ) -> Result<Parent> {
         validate_id(id)?;
+        let claimed = parse_paths(paths_csv);
+        refuse_claim_paths(&claimed, id)?;
         let mut state = self.store.load()?;
         if state.parents.contains_key(id) {
             return Err(ShopError::ParentExists(id.to_string()));
         }
         let mut parent = Parent::new(id.to_string(), title.to_string(), body.to_string());
-        parent.claimed_paths = crate::paths::parse_paths(paths_csv);
+        parent.claimed_paths = claimed;
         parent.lease_note = crate::aasm_map::LEASE_NOTE.to_string();
         state.parents.insert(id.to_string(), parent.clone());
         self.store.save(&state)?;
@@ -496,9 +485,7 @@ impl Shop {
     ) -> Result<Child> {
         validate_id(parent_id)?;
         validate_id(child_id)?;
-        if peer.trim().is_empty() {
-            return Err(ShopError::InvalidId(peer.to_string()));
-        }
+        validate_id(peer)?;
         if self.worker(peer)?.is_none() {
             return Err(ShopError::UnknownPeer(peer.to_string()));
         }
@@ -506,6 +493,7 @@ impl Shop {
         if paths.is_empty() {
             return Err(ShopError::EmptyPaths);
         }
+        refuse_claim_paths(&paths, parent_id)?;
 
         let mut state = self.store.load()?;
         check_overlap(&state, &paths)?;
@@ -665,9 +653,10 @@ impl Shop {
             .parents
             .get(parent_id)
             .ok_or_else(|| ShopError::ParentNotFound(parent_id.to_string()))?;
-        let child = parent.children.get(child_id).ok_or_else(|| {
-            ShopError::ChildNotFound(child_id.to_string(), parent_id.to_string())
-        })?;
+        let child = parent
+            .children
+            .get(child_id)
+            .ok_or_else(|| ShopError::ChildNotFound(child_id.to_string(), parent_id.to_string()))?;
         let peer = child.peer.clone();
         let worker = self
             .worker(&peer)?
@@ -723,23 +712,32 @@ impl Shop {
                 .parents
                 .get_mut(parent_id)
                 .ok_or_else(|| ShopError::ParentNotFound(parent_id.to_string()))?;
-            if !parent.state.allows_child_update() {
+            if !parent.state.allows_child_update()
+                || matches!(parent.state, ParentState::Verified | ParentState::Closed)
+            {
                 return Err(ShopError::InvalidParentState {
                     current: parent.state,
                     op: "accept",
                 });
             }
-            let child = parent.children.get_mut(child_id).ok_or_else(|| {
-                ShopError::ChildNotFound(child_id.to_string(), parent_id.to_string())
-            })?;
-            if child.state != ChildState::Assigned {
-                return Err(ShopError::InvalidChildState {
-                    current: child.state,
-                    op: "accept",
-                });
+            {
+                let child = parent.children.get_mut(child_id).ok_or_else(|| {
+                    ShopError::ChildNotFound(child_id.to_string(), parent_id.to_string())
+                })?;
+                if child.state != ChildState::Assigned {
+                    return Err(ShopError::InvalidChildState {
+                        current: child.state,
+                        op: "accept",
+                    });
+                }
+                child.handoff = Some(handoff.clone());
+                child.state = ChildState::Joined;
             }
-            child.handoff = Some(handoff.clone());
-            child.state = ChildState::Joined;
+            // Handoff is Evidence, not authority. Accept never CLOSES or VERIFIES.
+            parent.verify = None;
+            if matches!(parent.state, ParentState::Verified | ParentState::Closed) {
+                parent.state = ParentState::InFlight;
+            }
             parent.touch();
         }
         state
@@ -768,6 +766,10 @@ impl Shop {
                 op: "bounce",
             });
         }
+        let before =
+            parent.children.get(child_id).cloned().ok_or_else(|| {
+                ShopError::ChildNotFound(child_id.to_string(), parent_id.to_string())
+            })?;
         {
             let child = parent.children.get_mut(child_id).ok_or_else(|| {
                 ShopError::ChildNotFound(child_id.to_string(), parent_id.to_string())
@@ -786,6 +788,11 @@ impl Shop {
         parent.state = ParentState::InFlight;
         parent.touch();
         let bounced = parent.children.get(child_id).unwrap().clone();
+        if !proving::bounce_keeps_peer_paths(&before, &bounced) {
+            return Err(ShopError::IncompleteEvidence(
+                "bounce must keep the same peer and paths (causal backjump)".into(),
+            ));
+        }
         self.store.save(&state)?;
         self.event(json!({
             "op": "bounce",
@@ -824,7 +831,8 @@ impl Shop {
         }
 
         // Never skip the join barrier. Never invent a child lane.
-        if parent.all_children_joined() {
+        // JOINED without a recorded handoff, ASSIGNED, or BOUNCED is WAIT.
+        if parent.all_children_joined() && child_evidence_gap(parent).is_none() {
             parent.state = ParentState::ReduceReady;
         } else if parent.children.is_empty() {
             parent.state = ParentState::Held;
@@ -850,6 +858,9 @@ impl Shop {
             .ok_or_else(|| ShopError::ParentNotFound(parent_id.to_string()))?;
         if parent.state != ParentState::ReduceReady || !parent.all_children_joined() {
             return Err(ShopError::JoinBarrier);
+        }
+        if let Some(reason) = child_evidence_gap(parent) {
+            return Err(ShopError::IncompleteEvidence(reason.to_string()));
         }
         parent.state = ParentState::Reduced;
         parent.reduce_note = Some(note.to_string());
@@ -892,6 +903,11 @@ impl Shop {
             pull_request_reason: pr_reason,
             aasm_note: crate::aasm_map::REDUCE_NOT_RECOMBINE.to_string(),
         };
+        if !proving::reduce_is_not_recombine(&package) {
+            return Err(ShopError::IncompleteEvidence(
+                "reduce must not claim AASM recombine".into(),
+            ));
+        }
         self.store.save(&state)?;
         if let Some(p) = state.parents.get(parent_id) {
             self.store.append_floor_history(p)?;
@@ -926,10 +942,6 @@ impl Shop {
             None => parent.verify_cmd.clone(),
         };
 
-        let assigned_open = parent
-            .children
-            .values()
-            .any(|c| c.state == ChildState::Assigned);
         let mut record = match cmd {
             None => VerifyRecord {
                 cmd: String::new(),
@@ -946,12 +958,12 @@ impl Shop {
                 run_verify_command(&cmd)
             }
         };
-        if assigned_open && record.status == EvidenceStatus::Pass {
+        if let Some(reason) = child_evidence_gap(parent) {
             record.status = EvidenceStatus::Wait;
-            record.last_lines = format!(
-                "{}\nmandatory child still ASSIGNED (obligation open)",
-                record.last_lines
-            );
+            if !record.last_lines.is_empty() {
+                record.last_lines.push('\n');
+            }
+            record.last_lines.push_str(reason);
         }
         if let Some(reason) = self.github_verify_block(parent) {
             record.status = EvidenceStatus::Wait;
@@ -961,11 +973,18 @@ impl Shop {
             record.last_lines.push_str(&reason);
         }
         record = record.classify();
+        if !proving::wait_is_not_verified(&record) {
+            record.status = EvidenceStatus::Wait;
+            record = record.classify();
+        }
         parent.verify = Some(record.clone());
         parent.state = match record.class {
             crate::aasm_map::EvidenceClass::Pass => ParentState::Verified,
             _ => ParentState::VerifyWait,
         };
+        if !proving::recorded_verify_pass(parent) {
+            parent.state = ParentState::VerifyWait;
+        }
         parent.touch();
         self.store.save(&state)?;
         let bytes = serde_json::to_vec_pretty(&record)?;
@@ -998,11 +1017,19 @@ impl Shop {
             .parents
             .get_mut(parent_id)
             .ok_or_else(|| ShopError::ParentNotFound(parent_id.to_string()))?;
-        let verified = parent.state == ParentState::Verified
-            && parent
-                .verify
-                .as_ref()
-                .is_some_and(|v| v.status == EvidenceStatus::Pass);
+        if let Some(reason) = child_evidence_gap(parent) {
+            let reason = format!("WAIT: {reason}; never fake a merge");
+            parent.github_merge_status = Some(EvidenceStatus::Wait);
+            parent.github_merge_reason = Some(reason.clone());
+            self.store.save(&state)?;
+            self.event(json!({
+                "op": "merge_blocked",
+                "parent": parent_id,
+                "reason": reason,
+            }))?;
+            return Err(ShopError::Wait(reason));
+        }
+        let verified = proving::recorded_verify_pass(parent);
         if !verified {
             let reason =
                 "merge blocked until shop verify recorded PASS / parent VERIFIED".to_string();
@@ -1064,6 +1091,17 @@ impl Shop {
                 parent.github_merged = true;
                 parent.github_merge_status = Some(EvidenceStatus::Pass);
                 parent.github_merge_reason = Some(crate::aasm_map::MERGE_ACK_NOTE.to_string());
+                // Merge ACK is command success, not achieved state. Never CLOSE here.
+                if parent.state == ParentState::Closed
+                    || !proving::merge_ack_is_not_achieved_state(parent)
+                {
+                    parent.state = ParentState::Verified;
+                }
+                if !proving::recorded_verify_pass(parent)
+                    || !proving::merge_ack_does_not_verify(parent)
+                {
+                    parent.state = ParentState::VerifyWait;
+                }
                 self.store.save(&state)?;
                 self.event(json!({
                     "op": "merge",
@@ -1085,26 +1123,21 @@ impl Shop {
 
     pub fn close(&mut self, parent_id: &str) -> Result<Parent> {
         let mut state = self.store.load()?;
-        let verified = {
-            let parent = state
-                .parents
-                .get(parent_id)
-                .ok_or_else(|| ShopError::ParentNotFound(parent_id.to_string()))?;
-            parent.state == ParentState::Verified
-                && parent
-                    .verify
-                    .as_ref()
-                    .is_some_and(|v| v.status == EvidenceStatus::Pass && v.exit_code == Some(0))
-        };
-        let assigned_open = state
+        let parent = state
             .parents
             .get(parent_id)
-            .map(|p| p.children.values().any(|c| c.state == ChildState::Assigned))
-            .unwrap_or(false);
-        if assigned_open {
+            .ok_or_else(|| ShopError::ParentNotFound(parent_id.to_string()))?;
+        if proving::assigned_child_open(parent) {
             return Err(ShopError::ObligationOpen(parent_id.to_string()));
         }
-        if !verified {
+        if joined_missing_handoff(parent) || bounced_child_open(parent) {
+            return Err(ShopError::CannotClose(parent_id.to_string()));
+        }
+        if !proving::close_allowed(parent) || !proving::parent_wait_is_not_verified(parent) {
+            return Err(ShopError::CannotClose(parent_id.to_string()));
+        }
+        // Handoff / mailbox / GitHub check / merge ACK cannot CLOSE.
+        if proving::information_cannot_close(parent) {
             return Err(ShopError::CannotClose(parent_id.to_string()));
         }
         let parent = state.parents.get_mut(parent_id).unwrap();
@@ -1791,7 +1824,105 @@ fn validate_id(id: &str) -> Result<()> {
     {
         return Err(ShopError::InvalidId(id.to_string()));
     }
+    let reserved = id.trim().trim_end_matches(['.', ' ']).to_ascii_lowercase();
+    if matches!(
+        reserved.as_str(),
+        "con"
+            | "prn"
+            | "aux"
+            | "nul"
+            | "com1"
+            | "com2"
+            | "com3"
+            | "com4"
+            | "com5"
+            | "com6"
+            | "com7"
+            | "com8"
+            | "com9"
+            | "lpt1"
+            | "lpt2"
+            | "lpt3"
+            | "lpt4"
+            | "lpt5"
+            | "lpt6"
+            | "lpt7"
+            | "lpt8"
+            | "lpt9"
+    ) {
+        return Err(ShopError::InvalidId(id.to_string()));
+    }
     Ok(())
+}
+
+/// Platform, absolute, UNC, drive-letter, or control-byte paths are not a lease.
+/// Empty parent scope still refuses amplification; overlap is a separate check.
+fn refuse_claim_paths(paths: &[String], parent_id: &str) -> Result<()> {
+    for p in paths {
+        if is_forbidden_project(Path::new(p)) {
+            return Err(ShopError::ForbiddenWrite(PathBuf::from(p)));
+        }
+        if !crate::aasm_map::path_within_parent_scope(p, p) {
+            return Err(ShopError::ParentSubset {
+                path: p.clone(),
+                parent: parent_id.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// JOINED without a recorded handoff is incomplete evidence, not a join.
+fn joined_missing_handoff(parent: &Parent) -> bool {
+    parent
+        .children
+        .values()
+        .any(|c| c.state == ChildState::Joined && c.handoff.is_none())
+}
+
+/// BOUNCED is unfinished work. It cannot CLOSE or verify PASS.
+fn bounced_child_open(parent: &Parent) -> bool {
+    parent
+        .children
+        .values()
+        .any(|c| c.state == ChildState::Bounced)
+}
+
+/// Fail-closed GitHub check evaluation. One green run among failures is WAIT.
+/// Missing, empty, pending, or mixed conclusions are never PASS.
+fn github_checks_wait(v: &Value) -> Option<String> {
+    let Some(runs) = v.get("check_runs").and_then(|a| a.as_array()) else {
+        return Some("WAIT: missing or failing GitHub checks".into());
+    };
+    if runs.is_empty() || !runs.iter().all(github_check_run_passed) {
+        return Some("WAIT: missing or failing GitHub checks".into());
+    }
+    None
+}
+
+fn github_check_run_passed(run: &Value) -> bool {
+    let conclusion = run.get("conclusion").and_then(|c| c.as_str()).unwrap_or("");
+    if !conclusion.eq_ignore_ascii_case("success") {
+        return false;
+    }
+    match run.get("status").and_then(|s| s.as_str()) {
+        None | Some("completed") => true,
+        Some(_) => false,
+    }
+}
+
+/// Child-plane gaps that keep the parent on WAIT. Never fake PASS.
+fn child_evidence_gap(parent: &Parent) -> Option<&'static str> {
+    if proving::assigned_child_open(parent) {
+        return Some("mandatory child still ASSIGNED (obligation open)");
+    }
+    if joined_missing_handoff(parent) {
+        return Some("JOINED without handoff; incomplete evidence is WAIT");
+    }
+    if bounced_child_open(parent) {
+        return Some("child still BOUNCED; incomplete evidence is WAIT");
+    }
+    None
 }
 
 fn check_overlap(state: &ShopState, paths: &[String]) -> Result<()> {
@@ -1822,6 +1953,9 @@ fn check_overlap(state: &ShopState, paths: &[String]) -> Result<()> {
 
 fn load_handoff(spec: &str) -> Result<Handoff> {
     let path = Path::new(spec);
+    if is_forbidden_project(path) {
+        return Err(ShopError::ForbiddenWrite(path.to_path_buf()));
+    }
     let (bytes, source) = if path.is_file() {
         (fs::read(path)?, spec.to_string())
     } else {
@@ -1869,7 +2003,7 @@ fn handoff_status(bytes: &[u8]) -> Result<String> {
 
 fn run_verify_command(cmd: &str) -> VerifyRecord {
     let recorded_at = unix_now();
-    match Command::new("sh").arg("-c").arg(cmd).output() {
+    match spawn_verify_command(cmd) {
         Err(e) => VerifyRecord {
             cmd: cmd.to_string(),
             exit_code: None,
@@ -1909,6 +2043,52 @@ fn run_verify_command(cmd: &str) -> VerifyRecord {
             .classify()
         }
     }
+}
+
+/// Run a verify command without inventing an exit code.
+///
+/// Platform paths are refused (WAIT, never fake PASS). On Windows the portable
+/// tokens `true` / `false` used by shop tests become real `cmd /C exit`
+/// processes — `true` is not a Windows binary.
+fn spawn_verify_command(cmd: &str) -> std::io::Result<std::process::Output> {
+    let cmd = cmd.trim();
+    if cmd.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "empty verify command",
+        ));
+    }
+    if command_mentions_platform(cmd) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "refused Platform path; never fake PASS",
+        ));
+    }
+
+    #[cfg(windows)]
+    {
+        if cmd == "true" {
+            return Command::new("cmd").args(["/C", "exit", "0"]).output();
+        }
+        if cmd == "false" {
+            return Command::new("cmd").args(["/C", "exit", "1"]).output();
+        }
+        Command::new("cmd").arg("/C").arg(cmd).output()
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new("sh").arg("-c").arg(cmd).output()
+    }
+}
+
+fn command_mentions_platform(cmd: &str) -> bool {
+    if is_forbidden_project(Path::new(cmd)) {
+        return true;
+    }
+    let lower = cmd.to_ascii_lowercase();
+    lower.contains("textpcb platform")
+        || lower.contains("c:\\textpcb")
+        || lower.contains("c:/textpcb")
 }
 
 fn last_lines(s: &str, n: usize) -> String {
