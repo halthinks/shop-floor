@@ -40,6 +40,13 @@ use crate::types::{
 };
 use crate::workers::{Backend, Intelligence, Worker, WorkerRoster};
 
+fn env_shop_run() -> bool {
+    matches!(
+        std::env::var("SHOP_RUN").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
 #[derive(Clone)]
 pub struct Shop {
     store: Store,
@@ -561,6 +568,15 @@ impl Shop {
     }
 
     pub fn assign(&mut self, parent_id: &str) -> Result<Vec<AssignRecord>> {
+        self.assign_inner(parent_id, env_shop_run())
+    }
+
+    /// Assign, then launch each written child (`shop assign --run`).
+    pub fn assign_and_run(&mut self, parent_id: &str) -> Result<Vec<AssignRecord>> {
+        self.assign_inner(parent_id, true)
+    }
+
+    fn assign_inner(&mut self, parent_id: &str, run: bool) -> Result<Vec<AssignRecord>> {
         let mut state = self.store.load()?;
         let parent = state
             .parents
@@ -624,7 +640,72 @@ impl Shop {
                 }))?;
             }
         }
+        if run {
+            for rec in &records {
+                self.run_child(parent_id, &rec.lane_id)?;
+            }
+        }
         Ok(records)
+    }
+
+    /// Launch the configured process for an existing child.
+    ///
+    /// No command is Inconclusive: the assign stays, no fake PID. Process
+    /// start/exit are Evidence — never VERIFIED or CLOSE. A refused Platform
+    /// path is WAIT.
+    pub fn run_child(
+        &mut self,
+        parent_id: &str,
+        child_id: &str,
+    ) -> Result<crate::runner::RunEvidence> {
+        let state = self.store.load()?;
+        let parent = state
+            .parents
+            .get(parent_id)
+            .ok_or_else(|| ShopError::ParentNotFound(parent_id.to_string()))?;
+        let child = parent.children.get(child_id).ok_or_else(|| {
+            ShopError::ChildNotFound(child_id.to_string(), parent_id.to_string())
+        })?;
+        let peer = child.peer.clone();
+        let worker = self
+            .worker(&peer)?
+            .ok_or_else(|| ShopError::UnknownPeer(peer.clone()))?;
+
+        let wt = crate::worktree::child_worktree_path(&self.project_root, parent_id, child_id);
+        let worktree = wt.is_dir().then_some(wt);
+
+        let mut evidence = crate::runner::launch(&crate::runner::RunRequest {
+            peer: peer.clone(),
+            child: child_id.to_string(),
+            parent: parent_id.to_string(),
+            backend: worker.intelligence.backend.as_str().to_string(),
+            model: worker.intelligence.model.clone(),
+            worktree,
+            shop_dir: self.store.root().to_path_buf(),
+        });
+
+        if evidence.note.starts_with("refused Platform path") {
+            return Err(ShopError::Wait(evidence.note));
+        }
+
+        if let Some(pid) = evidence.pid {
+            if let Some(owned) = evidence.take_child() {
+                std::mem::forget(owned);
+            }
+            self.track_pid(pid, Some(parent_id), Some(child_id), Some(&peer))?;
+        }
+
+        self.event(json!({
+            "op": "run",
+            "title": "run",
+            "parent": parent_id,
+            "child": child_id,
+            "peer": peer,
+            "pid": evidence.pid,
+            "class": evidence.class.as_str(),
+            "note": evidence.note,
+        }))?;
+        Ok(evidence)
     }
 
     pub fn accept(

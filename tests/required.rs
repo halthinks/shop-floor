@@ -997,6 +997,91 @@ fn no_fake_orchestrator_line_when_mailbox_empty() {
     assert!(!text.iter().any(|l| l["role"] == "orchestrator"));
 }
 
+#[test]
+fn run_child_unconfigured_is_inconclusive_keeps_assign() {
+    let (mut shop, _dir) = fresh();
+    enroll(&mut shop, &["alice"]);
+    shop.open("P", "t", "b").unwrap();
+    shop.split("P", "c1", "alice", "src/a", "one", "do a")
+        .unwrap();
+    let recs = shop.assign("P").unwrap();
+    assert_eq!(recs.len(), 1);
+
+    let ev = shop.run_child("P", "c1").unwrap();
+    assert_eq!(ev.class, shop::EvidenceClass::Inconclusive);
+    assert_eq!(ev.pid, None, "unconfigured run must not invent a PID");
+    assert!(!ev.is_verified());
+    assert_ne!(ev.class, shop::EvidenceClass::Pass);
+
+    let child = shop.state().unwrap().parents["P"].children["c1"].clone();
+    assert_eq!(child.state, ChildState::Assigned);
+    assert!(child.dispatched);
+    assert!(shop.procwait().unwrap().processes.is_empty());
+}
+
+#[test]
+fn run_child_tracks_real_pid_without_verifying() {
+    let (mut shop, dir) = fresh();
+    enroll(&mut shop, &["alice"]);
+    shop.open("P", "t", "b").unwrap();
+    shop.split("P", "c1", "alice", "src/a", "one", "do a")
+        .unwrap();
+    shop.assign("P").unwrap();
+    fs::write(
+        dir.join("run.json"),
+        r#"{"schema":1,"backends":{"grok-bot":"true"}}"#,
+    )
+    .unwrap();
+
+    let ev = shop.run_child("P", "c1").unwrap();
+    let pid = ev.pid.expect("configured run.json must spawn");
+    assert!(!ev.is_verified());
+    assert_ne!(ev.class, shop::EvidenceClass::Pass);
+
+    let ledger = shop.procwait().unwrap();
+    assert!(
+        ledger.processes.iter().any(|p| p.pid == pid),
+        "launch must track pid for wait/stop/pills"
+    );
+    let parent = shop.state().unwrap().parents["P"].clone();
+    assert_ne!(parent.state, ParentState::Verified);
+}
+
+#[test]
+fn assign_does_not_launch_without_run_flag() {
+    let (mut shop, dir) = fresh();
+    enroll(&mut shop, &["alice"]);
+    shop.open("P", "t", "b").unwrap();
+    shop.split("P", "c1", "alice", "src/a", "one", "do a")
+        .unwrap();
+    fs::write(
+        dir.join("run.json"),
+        r#"{"schema":1,"backends":{"grok-bot":"true"}}"#,
+    )
+    .unwrap();
+
+    shop.assign("P").unwrap();
+    assert!(
+        shop.procwait().unwrap().processes.is_empty(),
+        "default assign must not launch"
+    );
+}
+
+#[test]
+fn assign_and_run_without_command_keeps_assign() {
+    let (mut shop, _dir) = fresh();
+    enroll(&mut shop, &["alice"]);
+    shop.open("P", "t", "b").unwrap();
+    shop.split("P", "c1", "alice", "src/a", "one", "do a")
+        .unwrap();
+    let recs = shop.assign_and_run("P").unwrap();
+    assert_eq!(recs.len(), 1);
+    let child = shop.state().unwrap().parents["P"].children["c1"].clone();
+    assert_eq!(child.state, ChildState::Assigned);
+    assert!(child.dispatched);
+    assert!(shop.procwait().unwrap().processes.is_empty());
+}
+
 fn http_get(addr: &str, path: &str) -> String {
     let mut last = String::new();
     for _ in 0..40 {
