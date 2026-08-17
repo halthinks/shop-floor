@@ -7,14 +7,16 @@ use clap::{Parser, Subcommand};
 
 use crate::engine::Shop;
 use crate::mailbox::DEFAULT_FROM;
+use crate::skills_live::LiveGitHub;
 use crate::types::{EvidenceStatus, ParentState};
+use crate::ui::{self, DEFAULT_PORT};
 
 #[derive(Parser, Debug)]
 #[command(
     name = "shop",
     version,
     about = "Shop-floor hold-split-join sequencer",
-    long_about = "Thin adapter: hold a parent, split claim-locked children, join, reduce, verify, close.\n\
+    long_about = "Open shop ui, add a worker, assign AI intelligence, then hold-split-join.\n\
                   Not AASM. Not T3 Code. Incomplete evidence is WAIT, never fake PASS."
 )]
 #[command(arg_required_else_help = true)]
@@ -39,6 +41,37 @@ pub struct Cli {
 pub enum Commands {
     /// Create a shop store (default `.shop/` in cwd)
     Init { dir: Option<PathBuf> },
+    /// Open the local shop UI (add worker + assign intelligence)
+    Ui {
+        #[arg(long, default_value_t = DEFAULT_PORT)]
+        port: u16,
+    },
+    /// Alias for `shop ui`
+    Serve {
+        #[arg(long, default_value_t = DEFAULT_PORT)]
+        port: u16,
+    },
+    /// Enroll a worker (thin CLI for the same store write as the UI)
+    Add {
+        #[arg(long)]
+        peer: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        backend: String,
+        #[arg(long)]
+        model: Option<String>,
+        /// Grant the GitHub skill pack (default on)
+        #[arg(long, default_value_t = true)]
+        github_skills: bool,
+        #[arg(long)]
+        no_github_skills: bool,
+    },
+    /// Connect a GitHub repo (local record; token stays in .shop/)
+    Github {
+        #[command(subcommand)]
+        cmd: GithubCmd,
+    },
     /// Create a parent in state HELD
     Open {
         #[arg(long)]
@@ -101,6 +134,19 @@ pub enum Commands {
     Close { parent: String },
 }
 
+#[derive(Subcommand, Debug)]
+pub enum GithubCmd {
+    /// Record owner/name (+ optional token file)
+    Connect {
+        /// owner/name
+        repo: String,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+    },
+}
+
 pub fn run() -> Result<()> {
     run_cli(Cli::parse())
 }
@@ -115,6 +161,15 @@ pub fn run_cli(cli: Cli) -> Result<()> {
             println!("initialized shop store {}", shop.store_root().display());
             Ok(())
         }
+        Commands::Ui { port } | Commands::Serve { port } => {
+            let shop = ui::ensure_store(cli.store.clone())?
+                .with_mailbox(cli.mailbox)
+                .with_from(cli.from);
+            let live = std::sync::Arc::new(LiveGitHub::detect(shop.store_root()));
+            let shop = shop.with_github(live);
+            ui::run(shop, port).map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(())
+        }
         other => {
             let mut shop = Shop::open_store(&cli.store)
                 .with_context(|| format!("open store {}", cli.store.display()))?
@@ -127,7 +182,38 @@ pub fn run_cli(cli: Cli) -> Result<()> {
 
 fn dispatch(shop: &mut Shop, command: Commands) -> Result<()> {
     match command {
-        Commands::Init { .. } => unreachable!(),
+        Commands::Init { .. } | Commands::Ui { .. } | Commands::Serve { .. } => unreachable!(),
+        Commands::Add {
+            peer,
+            name,
+            backend,
+            model,
+            github_skills,
+            no_github_skills,
+        } => {
+            let skills = github_skills && !no_github_skills;
+            let w = shop.add_worker(
+                &peer,
+                name.as_deref().unwrap_or(&peer),
+                &backend,
+                model.as_deref().unwrap_or(""),
+                skills,
+            )?;
+            println!(
+                "added worker {} backend={} model={} github_skills={} (capacity only)",
+                w.peer, w.intelligence.backend, w.intelligence.model, w.github_skills
+            );
+        }
+        Commands::Github { cmd } => match cmd {
+            GithubCmd::Connect {
+                repo,
+                branch,
+                token,
+            } => {
+                let r = shop.github_connect(&repo, branch.as_deref(), token.as_deref())?;
+                println!("connected GitHub repo {}", r.slug());
+            }
+        },
         Commands::Open { id, title, body } => {
             shop.open(&id, &title, &body)?;
             println!("opened parent {id} in HELD");

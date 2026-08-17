@@ -93,6 +93,12 @@ pub enum EvidenceStatus {
     Wait,
 }
 
+impl Default for EvidenceStatus {
+    fn default() -> Self {
+        Self::Wait
+    }
+}
+
 impl fmt::Display for EvidenceStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -123,6 +129,11 @@ pub struct Child {
     pub dispatched: bool,
     pub handoff: Option<Handoff>,
     pub bounce_reason: Option<String>,
+    /// Intended child ref `shop/<parent>/<child>`. Recorded even when not created.
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub branch_created: bool,
 }
 
 impl Child {
@@ -137,6 +148,8 @@ impl Child {
             dispatched: false,
             handoff: None,
             bounce_reason: None,
+            branch: None,
+            branch_created: false,
         }
     }
 }
@@ -160,6 +173,14 @@ pub struct Parent {
     pub verify_cmd: Option<String>,
     pub verify: Option<VerifyRecord>,
     pub reduce_note: Option<String>,
+    #[serde(default)]
+    pub github_pr_url: Option<String>,
+    #[serde(default)]
+    pub github_pr_number: Option<u64>,
+    #[serde(default)]
+    pub github_pr_status: Option<EvidenceStatus>,
+    #[serde(default)]
+    pub github_pr_reason: Option<String>,
     pub opened_at: u64,
     pub updated_at: u64,
 }
@@ -176,6 +197,10 @@ impl Parent {
             verify_cmd: None,
             verify: None,
             reduce_note: None,
+            github_pr_url: None,
+            github_pr_number: None,
+            github_pr_status: None,
+            github_pr_reason: None,
             opened_at: now,
             updated_at: now,
         }
@@ -219,6 +244,18 @@ pub struct ReducePackage {
     pub note: String,
     pub state: ParentState,
     pub children: Vec<ReduceChild>,
+    #[serde(default)]
+    pub github_repo: Option<String>,
+    #[serde(default)]
+    pub child_branches: Vec<String>,
+    #[serde(default)]
+    pub pull_request_url: Option<String>,
+    #[serde(default)]
+    pub pull_request_number: Option<u64>,
+    #[serde(default)]
+    pub pull_request_status: EvidenceStatus,
+    #[serde(default)]
+    pub pull_request_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

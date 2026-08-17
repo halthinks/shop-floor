@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::error::{Result, ShopError};
+use crate::github::GitHubRepo;
 use crate::types::ShopState;
+use crate::workers::WorkerRoster;
 
 const META: &str = r#"{
   "kind": "shop",
@@ -45,6 +47,9 @@ impl Store {
             write_json_atomic(&root.join("snapshot.json"), &empty)?;
             write_json_atomic(&root.join("claims.json"), &empty.claims)?;
         }
+        if !root.join("workers.json").exists() {
+            write_json_atomic(&root.join("workers.json"), &WorkerRoster::default())?;
+        }
         Ok(Self { root })
     }
 
@@ -57,7 +62,52 @@ impl Store {
         fs::create_dir_all(root.join("outbox"))?;
         fs::create_dir_all(root.join("reduce"))?;
         fs::create_dir_all(root.join("verify"))?;
+        if !root.join("workers.json").exists() {
+            write_json_atomic(&root.join("workers.json"), &WorkerRoster::default())?;
+        }
         Ok(Self { root })
+    }
+
+    pub fn load_workers(&self) -> Result<WorkerRoster> {
+        let path = self.root.join("workers.json");
+        if !path.exists() {
+            return Ok(WorkerRoster::default());
+        }
+        Ok(serde_json::from_slice(&fs::read(&path)?)?)
+    }
+
+    pub fn save_workers(&self, roster: &WorkerRoster) -> Result<()> {
+        write_json_atomic(&self.root.join("workers.json"), roster)
+    }
+
+    pub fn load_github(&self) -> Result<Option<GitHubRepo>> {
+        let path = self.root.join("github.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_slice(&fs::read(&path)?)?))
+    }
+
+    pub fn save_github(&self, repo: &GitHubRepo) -> Result<()> {
+        write_json_atomic(&self.root.join("github.json"), repo)
+    }
+
+    pub fn write_token(&self, token: &str) -> Result<()> {
+        let path = self.root.join("github.token");
+        ensure_under(&path, &[self.root.clone()])?;
+        write_atomic(&path, token.trim().as_bytes())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&path)?.permissions();
+            perms.set_mode(0o600);
+            fs::set_permissions(&path, perms)?;
+        }
+        Ok(())
+    }
+
+    pub fn has_token_file(&self) -> bool {
+        self.root.join("github.token").is_file()
     }
 
     pub fn load(&self) -> Result<ShopState> {

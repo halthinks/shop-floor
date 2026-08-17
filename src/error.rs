@@ -61,6 +61,21 @@ pub enum ShopError {
     #[error("allowed_paths must be a non-empty comma-separated list")]
     EmptyPaths,
 
+    #[error("unknown worker peer '{0}'; enroll capacity with shop ui or shop add first")]
+    UnknownPeer(String),
+
+    #[error("duplicate worker peer '{0}'")]
+    DuplicatePeer(String),
+
+    #[error("unknown intelligence backend '{0}' (cursor | cursor-ultra | grok-bot | grok-build)")]
+    UnknownBackend(String),
+
+    #[error("unknown GitHub skill '{0}'")]
+    UnknownSkill(String),
+
+    #[error("WAIT: {0}")]
+    Wait(String),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 

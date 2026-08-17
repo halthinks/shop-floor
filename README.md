@@ -1,64 +1,43 @@
 # shop
 
-Thin shop-floor sequencer: **hold → split → join → reduce → verify → close**.
-
-`shop` is not [AASM](https://github.com/halthinks/AASM) and not T3 Code. AASM stays the authority calculus. This crate only keeps durable parent-job state so isolated workers can be sequenced without overlapping `allowed_paths`. Quantity of workers is not the problem. Sequencing is.
-
-## What it is not
-
-- Not an authority/solver kernel. Do not treat shop state as truth.
-- Not a PCB/CAD model. No domain types live here.
-- Not a merge bot. `shop reduce` writes a package under `.shop/`; it does not land onto a canonical repo.
-
-## Authority (enforced)
-
-These rules come from AASM's evidence/authority split and are enforced in code:
-
-- A handoff is **Evidence**, not truth.
-- A CLI/test exit 0 is **Evidence**, not authority to `close` unless `shop verify` recorded a PASS.
-- `shop` never invents a child lane. Only `shop split` (human/SuperGrok) creates children.
-- Incomplete evidence is **WAIT**, never a fake PASS.
-- `shop` writes only inside the shop store and an optional mailbox outbox.
-
-## Loop
+Open the floor, add a worker, assign AI intelligence, then sequence work.
 
 ```text
-shop init
+shop ui
+```
+
+That starts a localhost page (default port **7745**, so it does not collide with a live room on 7744). In the form: name/peer, intelligence backend (`cursor` | `cursor-ultra` | `grok-bot` | `grok-build`), and an optional model id you already have. Shop never invents Cursor model IDs. Adding a worker enrolls **capacity only** — it does not create a job, invent a lane, write `C:\TextPCB Platform`, or send mailbox assigns.
+
+`shop add --peer alice --name Alice --backend grok-bot` is the same store write for tests and scripts. Roster lives in `.shop/workers.json`.
+
+`shop` is not [AASM](https://github.com/halthinks/AASM) and not T3 Code. AASM stays the authority calculus. This crate keeps durable parent-job state so isolated workers can be sequenced without overlapping `allowed_paths`.
+
+## Hold-split-join
+
+```text
 shop open --id PARENT --title "..." --body "..."
-shop split PARENT --child C1 --peer PEER --paths a,b --title "..." --body "..."
+shop split PARENT --child C1 --peer alice --paths a,b --title "..." --body "..."
 shop assign PARENT
-# workers run; they do not share paths
 shop accept PARENT --child C1 --handoff ./handoff.json
-# or: shop bounce PARENT --child C1 --reason "..."   (same peer/paths only)
-shop join PARENT          # all JOINED -> REDUCE_READY; else stay put
+shop join PARENT
 shop reduce PARENT --note "..."
 shop verify PARENT --cmd "cargo test"
-shop close PARENT         # only from VERIFIED
+shop close PARENT
 ```
 
 Parent: `HELD → IN_FLIGHT → REDUCE_READY → REDUCED → VERIFY_WAIT|VERIFIED → CLOSED`
 
-Child: `ASSIGNED → JOINED | BOUNCED` (bounce may return to `ASSIGNED` on the same peer)
+`split` rejects unknown peers and overlapping in-flight `allowed_paths`. Bounce stays on the same peer/paths. Incomplete evidence is **WAIT**, never a fake PASS. `close` only from `VERIFIED`.
 
-### Claim lock
+## GitHub
 
-`split` rejects any `allowed_paths` overlap with an in-flight child of any open parent. That is the collision ledger.
+`shop github connect owner/name` (or the GitHub panel in the UI) records the repo in `.shop/github.json`. An optional token field writes `.shop/github.token` (gitignored; never committed). Each child gets an intended branch `shop/<parent>/<child>` — the branch is created only when `gh` or a token actually works; otherwise the ref is recorded and stays WAIT. `reduce` lists repo + child branches and opens a **draft** PR only if authenticated; if not, the package stays WAIT and shop never fakes a PR URL. `verify` may treat PR checks as evidence when a token works; missing checks or no real PR = WAIT, never VERIFIED. Merge is an explicit danger control, never automatic.
 
-### Bounce
-
-A bounced child stays tied to the same peer and paths. `shop assign` may return it to `ASSIGNED` on that lane only.
-
-### WAIT, not fake PASS
-
-`verify` records exit code and last lines. A recorded exit 0 → `VERIFIED`. Failure, missing command, or missing evidence → `WAIT`. `close` is refused unless verify recorded PASS.
-
-## Mailbox
-
-`--mailbox DIR` writes TextPCB agent-bridge v1 assign JSON (`schema_version=textpcb/agent-bridge/v1`, `type=assign`, `from=cursor-groksuperheavy` by default). If that directory is missing, `assign` still writes `.shop/outbox/`. Tests do not need a live Windows mailbox.
+The GitHub skill pack (shop wrappers of the official MCP surface, via `gh` or `GITHUB_TOKEN`, mock in tests): me/whoami; repos search/connect/create (create is explicit, default private); files get/put/delete/push; branches list/create; commits list/get/search; issues list/read/write/comment/sub-issues; pulls list/read (diff/files/commits/reviews/comments/status/check_runs)/create/update/update-branch/merge (explicit only); reviews write/pending comments/reply; search code/issues/pulls/commits/users; releases/tags; collaborators/teams (read); fork; secret scan of provided content (kind+offset only, no secret dumps). A worker toggle grants or revokes the whole pack.
 
 ## Store
 
-Durable JSON under `.shop/` (or `shop init DIR`): snapshot, per-parent files, claim ledger, outbox, reduce packages. Writes are temp + rename. No database.
+Durable JSON under `.shop/` (gitignored): snapshot, parents, claims, workers, github, outbox, reduce packages. Writes are temp + rename. Shop writes only inside the store and an optional mailbox outbox.
 
 ## Build
 

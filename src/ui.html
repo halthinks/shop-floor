@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>shop — floor</title>
+  <style>
+    :root { color-scheme: dark; --bg:#141414; --card:#1e1e1e; --ink:#f2f2f2; --muted:#9a9a9a; --line:#333; --acc:#c4a35a; --danger:#c45a5a; }
+    body { margin:0; font:15px/1.45 system-ui,sans-serif; background:var(--bg); color:var(--ink); }
+    main { max-width:920px; margin:0 auto; padding:24px; }
+    h1 { font-size:1.4rem; font-weight:600; }
+    h2 { font-size:1.05rem; margin:1.4rem 0 .6rem; color:var(--acc); }
+    p, label, td, th { color:var(--ink); }
+    .muted { color:var(--muted); font-size:.92rem; }
+    section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:16px 18px; margin-bottom:16px; }
+    form { display:grid; gap:10px; }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    input, select, button, textarea { font:inherit; padding:7px 9px; border-radius:5px; border:1px solid var(--line); background:#111; color:var(--ink); }
+    button { cursor:pointer; background:#2a2a2a; }
+    button.primary { background:var(--acc); color:#111; border-color:var(--acc); font-weight:600; }
+    button.danger { background:var(--danger); color:#111; border-color:var(--danger); font-weight:600; }
+    table { width:100%; border-collapse:collapse; }
+    th, td { text-align:left; padding:6px 4px; border-bottom:1px solid var(--line); vertical-align:top; }
+    .tag { font-size:.78rem; color:var(--muted); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>shop</h1>
+  <p class="muted">Hold-split-join sequencer. Add a worker and assign AI intelligence. Enrolling capacity does not create a job or a lane.</p>
+
+  <section>
+    <h2>Add worker</h2>
+    <form id="add-worker" method="post" action="/workers">
+      <div class="row">
+        <label>Name <input name="name" required placeholder="Alice"></label>
+        <label>Peer <input name="peer" required placeholder="alice"></label>
+      </div>
+      <div class="row">
+        <label>Intelligence backend
+          <select id="intelligence-backend" name="backend">
+            <option value="cursor">cursor</option>
+            <option value="cursor-ultra">cursor-ultra</option>
+            <option value="grok-bot">grok-bot</option>
+            <option value="grok-build">grok-build</option>
+          </select>
+        </label>
+        <label>Model id
+          <input id="intelligence-model" name="model" placeholder="Cursor Ultra / custom model id (optional for grok-*)">
+        </label>
+      </div>
+      <label><input type="checkbox" id="github-skills" name="github_skills" value="1" checked> GitHub skills pack (grant/revoke the whole pack)</label>
+      <button class="primary" type="submit">Add worker</button>
+    </form>
+  </section>
+
+  <section>
+    <h2>Roster</h2>
+    <div id="roster">Loading…</div>
+  </section>
+
+  <section id="github-panel">
+    <h2>GitHub</h2>
+    <p class="muted">Connect owner/name. Token writes to <code>.shop/github.token</code> (gitignored). Merge is explicit only.</p>
+    <form id="github-connect" method="post" action="/github/connect">
+      <div class="row">
+        <label>Owner <input name="owner" required placeholder="halthinks"></label>
+        <label>Repo <input name="name" required placeholder="shop-floor"></label>
+      </div>
+      <div class="row">
+        <label>Default branch <input name="branch" placeholder="main"></label>
+        <label>Token (optional) <input name="token" type="password" autocomplete="off"></label>
+      </div>
+      <button class="primary" type="submit">Connect repo</button>
+    </form>
+    <div id="github-status" class="muted" style="margin-top:12px"></div>
+    <h2>Issues</h2>
+    <pre id="github-issues" class="muted">WAIT until connected + authenticated</pre>
+    <h2>Pull requests</h2>
+    <pre id="github-pulls" class="muted">WAIT until connected + authenticated</pre>
+    <h2>Checks</h2>
+    <pre id="github-checks" class="muted">WAIT until a real PR exists</pre>
+    <form id="github-merge" method="post" action="/github/merge" onsubmit="return confirm('Explicit merge. Never auto. Continue?');">
+      <label>PR number <input name="number" required></label>
+      <label>Type MERGE to confirm <input name="confirm" required placeholder="MERGE"></label>
+      <button class="danger" type="submit">Merge (danger)</button>
+    </form>
+  </section>
+</main>
+<script>
+async function j(url, opt){ const r = await fetch(url, opt); return r.json(); }
+async function refresh(){
+  const w = await j('/api/workers');
+  const el = document.getElementById('roster');
+  if (!w.workers || !w.workers.length) { el.innerHTML = '<p class="muted">No workers yet.</p>'; }
+  else {
+    el.innerHTML = '<table><thead><tr><th>Peer</th><th>Name</th><th>Intelligence</th><th>GitHub skills</th><th></th></tr></thead><tbody>' +
+      w.workers.map(x => `<tr>
+        <td>${x.peer}</td><td>${x.name}</td>
+        <td>${x.intelligence.backend} <span class="tag">${x.intelligence.model||'(no model id)'}</span>
+          <form method="post" action="/workers/${encodeURIComponent(x.peer)}/intelligence">
+            <select name="backend">
+              <option ${x.intelligence.backend==='cursor'?'selected':''}>cursor</option>
+              <option ${x.intelligence.backend==='cursor-ultra'?'selected':''}>cursor-ultra</option>
+              <option ${x.intelligence.backend==='grok-bot'?'selected':''}>grok-bot</option>
+              <option ${x.intelligence.backend==='grok-build'?'selected':''}>grok-build</option>
+            </select>
+            <input name="model" value="${x.intelligence.model||''}" placeholder="model id">
+            <button type="submit">Update intelligence</button>
+          </form>
+        </td>
+        <td>
+          <form method="post" action="/workers/${encodeURIComponent(x.peer)}/github-skills">
+            <input type="hidden" name="enabled" value="${x.github_skills ? '0' : '1'}">
+            <button type="submit">${x.github_skills ? 'Revoke pack' : 'Grant pack'}</button>
+          </form>
+        </td>
+      </tr>`).join('') + '</tbody></table>';
+  }
+  const g = await j('/api/github');
+  document.getElementById('github-status').textContent = g.connected
+    ? ('Connected ' + g.repo + ' auth=' + g.authenticated + (g.reason ? ' — ' + g.reason : ''))
+    : 'Not connected';
+  document.getElementById('github-issues').textContent = JSON.stringify(g.issues, null, 2);
+  document.getElementById('github-pulls').textContent = JSON.stringify(g.pulls, null, 2);
+  document.getElementById('github-checks').textContent = JSON.stringify(g.checks, null, 2);
+}
+refresh().catch(e => { document.getElementById('roster').textContent = String(e); });
+</script>
+</body>
+</html>
