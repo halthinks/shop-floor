@@ -10,11 +10,11 @@
 
 use std::path::{Path, PathBuf};
 
-use shop::error::{Result, ShopError};
-use shop::project::{
+use crate::error::{Result, ShopError};
+use crate::project::{
     default_recents_path, project_name, project_root_from_store, refuse_platform, store_dir_for,
 };
-use shop::Shop;
+use crate::Shop;
 
 /// One open floor in the session.
 #[derive(Debug, Clone, PartialEq, Eq)]
