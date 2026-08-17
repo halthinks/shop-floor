@@ -106,6 +106,13 @@ const GAP_MARKERS: &[&str] = &[
     "obligation",
     "check run",
     "checks pass",
+    "checks passed",
+    "check passed",
+    "checks have pass",
+    "merge ack",
+    "recombine",
+    "achieved state",
+    "fact authority",
 ];
 
 const INCONCLUSIVE_MARKERS: &[&str] = &["fail", "exit", "conflict"];
@@ -125,8 +132,8 @@ pub fn classify_wait_reason(reason: &str) -> EvidenceClass {
     }
 }
 
-/// Fail-closed: WAIT / gap text / non-zero or missing exit cannot become PASS.
-/// Command success is not achieved state.
+/// Fail-closed: WAIT / gap / authority-claim text / non-zero or missing exit
+/// cannot become PASS. Command success is not achieved state.
 pub fn classify_verify(
     status: EvidenceStatus,
     exit_code: Option<i32>,
@@ -136,13 +143,13 @@ pub fn classify_verify(
     if from_lines != EvidenceClass::Unknown {
         return from_lines;
     }
-    if status == EvidenceStatus::Pass && exit_code == Some(0) {
-        return EvidenceClass::Pass;
-    }
     if matches!(exit_code, Some(code) if code != 0) {
         return EvidenceClass::Inconclusive;
     }
-    from_lines
+    if status == EvidenceStatus::Pass && exit_code == Some(0) {
+        return EvidenceClass::Pass;
+    }
+    EvidenceClass::Unknown
 }
 
 pub fn note_for(class: EvidenceClass) -> &'static str {
@@ -154,9 +161,29 @@ pub fn note_for(class: EvidenceClass) -> &'static str {
     }
 }
 
+/// Absolute, UNC, drive-letter, or control bytes. Not a lease path.
+/// `normalize_path` would strip a leading `/`, which is amplification.
+fn lease_path_refused_raw(raw: &str) -> bool {
+    if raw.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return true;
+    }
+    let t = raw.trim();
+    if t.is_empty() {
+        return true;
+    }
+    if t.starts_with('/') || t.starts_with('\\') {
+        return true;
+    }
+    let b = t.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+}
+
 /// Collapse `.` / `..` for lease-subset math only. Escape above the claim root
 /// or an empty result is refused. This is not an AASM path type.
 fn collapse_lease_path(raw: &str) -> Option<Vec<String>> {
+    if lease_path_refused_raw(raw) {
+        return None;
+    }
     let n = crate::paths::normalize_path(raw);
     if n.is_empty() {
         return None;
@@ -257,7 +284,23 @@ mod tests {
             EvidenceClass::InformationGap
         );
         assert_eq!(
+            classify_verify(EvidenceStatus::Pass, Some(0), "All checks have passed"),
+            EvidenceClass::InformationGap
+        );
+        assert_eq!(
+            classify_verify(EvidenceStatus::Pass, Some(0), "merge ack recorded"),
+            EvidenceClass::InformationGap
+        );
+        assert_eq!(
+            classify_verify(EvidenceStatus::Pass, Some(0), "claimed AASM recombine"),
+            EvidenceClass::InformationGap
+        );
+        assert_eq!(
             classify_verify(EvidenceStatus::Wait, Some(0), ""),
+            EvidenceClass::Unknown
+        );
+        assert_eq!(
+            classify_verify(EvidenceStatus::Wait, Some(0), "ok"),
             EvidenceClass::Unknown
         );
         assert_eq!(
@@ -291,9 +334,18 @@ mod tests {
         assert!(!path_within_parent_scope("src/a/../b", "src/a"));
         assert!(!path_within_parent_scope("../src/a", "src/a"));
         assert!(!path_within_parent_scope("C:/src/a", "src/a"));
+        assert!(!path_within_parent_scope("/src/a", "src"));
+        assert!(!path_within_parent_scope("\\src\\a", "src"));
+        assert!(!path_within_parent_scope("//src/a", "src"));
+        assert!(!path_within_parent_scope("src/a\0x", "src/a"));
         assert_eq!(
             paths_within_parent_scope(&["src/c".into()], &["src/a".into(), "src/b".into()]),
             Some("src/c".into())
+        );
+        assert_eq!(
+            paths_within_parent_scope(&["src/a".into()], &[]),
+            None,
+            "empty parent claim: children define claims (shop open-without-scope)"
         );
         assert_eq!(
             paths_within_parent_scope(&["src/a/x".into()], &["src/a".into()]),
