@@ -1,18 +1,13 @@
 //! Shop pulse rules. Fail-closed leftover naming and merge gate.
 //!
-//! This file is not a fifth product and not a `workers.rs` lane. AASM stays
-//! look-only. Missing evidence is WAIT, never default PASS.
+//! Leftover discovery is derived at runtime from `docs/SUITE_ROADMAP.md`
+//! named suite module paths (the table under "Suite modules (named next,
+//! disjoint)"). This file is not a fifth product and not a `workers.rs`
+//! lane. AASM stays look-only. Missing evidence is WAIT, never default PASS.
 //!
 //! Not declared from `src/lib.rs` (that leftover already has an owner).
 
-/// Reserved leftover groups, in order, one owner.
-pub const RESERVED: &[&[&str]] = &[
-    &["src/engine.rs"],
-    &["src/cli.rs"],
-    &["src/ui.rs", "src/ui.html", "src/ui.css"],
-    &["src/lib.rs"],
-];
-
+/// Forbidden paths. Not leftovers even if someone names them.
 pub const NEVER_MERGE: &[&str] = &[
     "src/workers.rs",
     "src/runner.rs",
@@ -20,19 +15,135 @@ pub const NEVER_MERGE: &[&str] = &[
     "src/procwait.rs",
 ];
 
-/// Historical floor leftovers. Never remmerge.
+/// Historical floor and early suite PRs. Never remmerge.
 pub const NEVER_REMMERGE_MIN: u64 = 8;
-pub const NEVER_REMMERGE_MAX: u64 = 18;
+pub const NEVER_REMMERGE_MAX: u64 = 29;
 
 pub const LINUX_TESTS: &str = "Linux tests";
 pub const WINDOWS_RELEASE: &str = "Windows release";
 
-pub const HOLES: &[&str] = &[
-    "engine verify/close/handoff cannot invent PASS; missing status is WAIT",
-    "CLI suite reads cannot invent PASS; empty steer cannot CLOSE",
-    "command-center missing counts/mailbox/boss view stay WAIT; a snapshot cannot VERIFY",
-    "crate-root WAIT / missing_evidence never invent PASS, VERIFIED, or CLOSE",
-];
+pub const SUITE_MODULES_HEADING: &str = "Suite modules (named next, disjoint)";
+
+/// One named leftover group from the suite-modules table, in table order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeftoverGroup {
+    pub paths: Vec<String>,
+    pub hole: String,
+    pub lane: String,
+}
+
+impl LeftoverGroup {
+    pub fn label(&self) -> String {
+        self.paths.join("+")
+    }
+
+    pub fn contains(&self, path: &str) -> bool {
+        self.paths.iter().any(|p| p == path)
+    }
+}
+
+/// Leftover set discovered from a SUITE_ROADMAP body. Not a closed array.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeftoverSet {
+    pub groups: Vec<LeftoverGroup>,
+}
+
+impl LeftoverSet {
+    pub fn from_roadmap(roadmap: &str) -> Self {
+        Self {
+            groups: parse_suite_module_groups(roadmap),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.groups.is_empty()
+    }
+
+    pub fn label(&self, idx: usize) -> String {
+        self.groups
+            .get(idx)
+            .map(LeftoverGroup::label)
+            .unwrap_or_default()
+    }
+
+    pub fn hole(&self, idx: usize) -> String {
+        self.groups
+            .get(idx)
+            .map(|g| g.hole.clone())
+            .unwrap_or_else(|| "fail-closed hole unnamed".into())
+    }
+
+    pub fn touched(&self, files: &[String]) -> Vec<String> {
+        let set = src_write_set(files);
+        let mut out = Vec::new();
+        for group in &self.groups {
+            for p in &group.paths {
+                if set.iter().any(|f| f == p) {
+                    out.push(p.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// Index of the single leftover group that contains every leftover path
+    /// in the write set. None if empty, spans two groups, or includes a src/
+    /// file outside that group.
+    pub fn group_index(&self, files: &[String]) -> Option<usize> {
+        let touched = self.touched(files);
+        if touched.is_empty() {
+            return None;
+        }
+        let mut found = None;
+        for (i, group) in self.groups.iter().enumerate() {
+            if touched.iter().all(|p| group.contains(p)) {
+                found = Some(i);
+                break;
+            }
+        }
+        let idx = found?;
+        let group = &self.groups[idx];
+        let src = src_write_set(files);
+        if src.iter().any(|f| !group.contains(f)) {
+            return None;
+        }
+        Some(idx)
+    }
+
+    #[allow(dead_code)]
+    pub fn write_set_is_leftover(&self, files: &[String]) -> bool {
+        self.group_index(files).is_some()
+    }
+
+    pub fn unused(&self, merged: &[PulsePr]) -> Vec<usize> {
+        let mut used = vec![false; self.groups.len()];
+        for pr in merged {
+            if !pr.merged {
+                continue;
+            }
+            if is_never_remmerge(pr.number) {
+                continue;
+            }
+            if touches_never_merge(&pr.files) {
+                continue;
+            }
+            if let Some(i) = self.group_index(&pr.files) {
+                used[i] = true;
+            }
+        }
+        (0..self.groups.len()).filter(|i| !used[*i]).collect()
+    }
+
+    pub fn name_leftover(&self, unused: &[usize]) -> (String, String) {
+        match unused.first().copied() {
+            None => (
+                String::new(),
+                "no unused named suite leftover; do not invent a fifth product".into(),
+            ),
+            Some(i) => (self.label(i), self.hole(i)),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckConclusion {
@@ -145,47 +256,94 @@ pub fn is_workers_pr(files: &[String]) -> bool {
     src_write_set(files).iter().any(|f| f == "src/workers.rs")
 }
 
-/// Reserved paths touched by this write set.
-pub fn reserved_touched(files: &[String]) -> Vec<String> {
-    let set = src_write_set(files);
+fn is_forbidden_leftover_path(p: &str) -> bool {
+    NEVER_MERGE.iter().any(|n| *n == p)
+}
+
+/// Named leftover paths are `src/` module paths from the suite table.
+/// Forbidden runner/worktree/procwait/workers lanes are never leftovers.
+fn is_named_leftover_path(p: &str) -> bool {
+    p.starts_with("src/") && !is_forbidden_leftover_path(p)
+}
+
+fn extract_paths(cell: &str) -> Vec<String> {
     let mut out = Vec::new();
-    for group in RESERVED {
-        for p in *group {
-            if set.iter().any(|f| f == p) {
-                out.push((*p).to_string());
+    let mut rest = cell;
+    while let Some(start) = rest.find('`') {
+        let after = &rest[start + 1..];
+        if let Some(end) = after.find('`') {
+            let inner = after[..end].trim();
+            if !inner.is_empty() {
+                out.push(normalize_path(inner));
+            }
+            rest = &after[end + 1..];
+        } else {
+            break;
+        }
+    }
+    if out.is_empty() {
+        for part in cell.split('+') {
+            let p = normalize_path(part);
+            if p.contains('/') {
+                out.push(p);
             }
         }
     }
     out
 }
 
-/// Index of the single reserved group that contains every reserved path in
-/// the write set. None if empty, spans two groups, or includes a src/ file
-/// outside that group.
-pub fn reserved_group_index(files: &[String]) -> Option<usize> {
-    let reserved = reserved_touched(files);
-    if reserved.is_empty() {
-        return None;
-    }
-    let mut found = None;
-    for (i, group) in RESERVED.iter().enumerate() {
-        if reserved.iter().all(|p| group.contains(&p.as_str())) {
-            found = Some(i);
-            break;
-        }
-    }
-    let idx = found?;
-    let group = RESERVED[idx];
-    let src = src_write_set(files);
-    if src.iter().any(|f| !group.contains(&f.as_str())) {
-        return None;
-    }
-    Some(idx)
+fn suite_modules_section(roadmap: &str) -> Option<&str> {
+    let lower = roadmap.to_ascii_lowercase();
+    let key = SUITE_MODULES_HEADING.to_ascii_lowercase();
+    let start = lower.find(&key)?;
+    let after = &roadmap[start..];
+    let rest = after.find('\n').map(|i| &after[i + 1..]).unwrap_or("");
+    let end = rest.find("\n## ").unwrap_or(rest.len());
+    Some(&rest[..end])
 }
 
-#[allow(dead_code)]
-pub fn write_set_is_reserved(files: &[String]) -> bool {
-    reserved_group_index(files).is_some()
+/// Parse leftover groups from the suite-modules table. Order is table order.
+/// A later named row is picked up with no code change.
+pub fn parse_suite_module_groups(roadmap: &str) -> Vec<LeftoverGroup> {
+    let Some(section) = suite_modules_section(roadmap) else {
+        return Vec::new();
+    };
+    let mut groups = Vec::new();
+    for line in section.lines() {
+        let line = line.trim();
+        if !line.starts_with('|') {
+            continue;
+        }
+        let cols: Vec<&str> = line.split('|').map(str::trim).collect();
+        if cols.len() < 5 {
+            continue;
+        }
+        let order = cols[1];
+        let lane = cols[2];
+        let path_cell = cols[3];
+        let do_cell = cols.get(4).copied().unwrap_or("");
+        if order.eq_ignore_ascii_case("order") || order.starts_with('-') {
+            continue;
+        }
+        let paths: Vec<String> = extract_paths(path_cell)
+            .into_iter()
+            .filter(|p| is_named_leftover_path(p))
+            .collect();
+        if paths.is_empty() {
+            continue;
+        }
+        let hole = if do_cell.is_empty() {
+            "fail-closed hole unnamed".into()
+        } else {
+            do_cell.to_string()
+        };
+        groups.push(LeftoverGroup {
+            paths,
+            hole,
+            lane: lane.to_string(),
+        });
+    }
+    groups
 }
 
 pub fn named_check<'a>(checks: &'a [CheckRun], name: &str) -> Option<&'a CheckRun> {
@@ -213,13 +371,19 @@ pub fn roadmap_ok(text: &str) -> bool {
         && (t.contains("do not vendor") || t.contains("does not vendor"))
 }
 
+pub fn suite_table_ok(text: &str) -> bool {
+    text.to_ascii_lowercase()
+        .contains(&SUITE_MODULES_HEADING.to_ascii_lowercase())
+        && !LeftoverSet::from_roadmap(text).is_empty()
+}
+
 /// Why this open PR must not merge. None = gate open.
-pub fn merge_block(pr: &PulsePr) -> Option<&'static str> {
+pub fn merge_block(pr: &PulsePr, leftovers: &LeftoverSet) -> Option<&'static str> {
     if pr.merged {
         return Some("already merged");
     }
     if is_never_remmerge(pr.number) {
-        return Some("never remmerge PRs #8–#18");
+        return Some("never remmerge PRs #8–#29");
     }
     if is_workers_pr(&pr.files) {
         return Some("never merge src/workers.rs");
@@ -227,8 +391,8 @@ pub fn merge_block(pr: &PulsePr) -> Option<&'static str> {
     if touches_never_merge(&pr.files) {
         return Some("never merge runner/worktree/procwait");
     }
-    if reserved_group_index(&pr.files).is_none() {
-        return Some("write set is not exactly one reserved leftover");
+    if leftovers.group_index(&pr.files).is_none() {
+        return Some("write set is not exactly one leftover path");
     }
     if !both_gates_green(&pr.checks) {
         return Some("WAIT: Linux tests and Windows release are not both success");
@@ -236,50 +400,13 @@ pub fn merge_block(pr: &PulsePr) -> Option<&'static str> {
     None
 }
 
-pub fn may_merge(pr: &PulsePr) -> bool {
-    merge_block(pr).is_none()
+pub fn may_merge(pr: &PulsePr, leftovers: &LeftoverSet) -> bool {
+    merge_block(pr, leftovers).is_none()
 }
 
-pub fn unused_groups(merged: &[PulsePr]) -> Vec<usize> {
-    let mut used = [false; 4];
-    for pr in merged {
-        if !pr.merged {
-            continue;
-        }
-        if is_never_remmerge(pr.number) {
-            continue;
-        }
-        if touches_never_merge(&pr.files) {
-            continue;
-        }
-        if let Some(i) = reserved_group_index(&pr.files) {
-            used[i] = true;
-        }
-    }
-    (0..RESERVED.len()).filter(|i| !used[*i]).collect()
-}
-
-pub fn leftover_label(idx: usize) -> String {
-    RESERVED[idx].join("+")
-}
-
-pub fn leftover_hole(idx: usize) -> &'static str {
-    HOLES.get(idx).copied().unwrap_or("fail-closed hole unnamed")
-}
-
-/// Empty leftover is forbidden while a reserved path is unused.
+/// Empty leftover is forbidden while a named unused path exists.
 pub fn leftover_name_allowed(name: &str, unused: &[usize]) -> bool {
     unused.is_empty() || !name.trim().is_empty()
-}
-
-pub fn name_leftover(unused: &[usize]) -> (String, String) {
-    match unused.first().copied() {
-        None => (
-            String::new(),
-            "no unused reserved leftover; do not invent a fifth product".into(),
-        ),
-        Some(i) => (leftover_label(i), leftover_hole(i).to_string()),
-    }
 }
 
 pub fn decide(facts: &PulseFacts) -> PulseDecision {
@@ -293,11 +420,23 @@ pub fn decide(facts: &PulseFacts) -> PulseDecision {
         };
     }
 
-    let unused = unused_groups(&facts.merged_prs);
-    let (leftover, hole) = name_leftover(&unused);
+    if !suite_table_ok(&facts.roadmap) {
+        return PulseDecision {
+            kind: PulseKind::Wait,
+            leftover: "WAIT".into(),
+            leftover_hole: "suite module table missing named leftover paths; never invent"
+                .into(),
+            pr: None,
+            reason: "WAIT: suite module table has no named leftover paths; never invent".into(),
+        };
+    }
+
+    let leftovers = LeftoverSet::from_roadmap(&facts.roadmap);
+    let unused = leftovers.unused(&facts.merged_prs);
+    let (leftover, hole) = leftovers.name_leftover(&unused);
     debug_assert!(
         leftover_name_allowed(&leftover, &unused),
-        "leftover name cannot be empty while a reserved path is unused"
+        "leftover name cannot be empty while a named unused SUITE_ROADMAP path exists"
     );
 
     if let Some(pr) = facts.open_prs.iter().find(|p| is_workers_pr(&p.files)) {
@@ -313,25 +452,27 @@ pub fn decide(facts: &PulseFacts) -> PulseDecision {
         };
     }
 
-    // Lander: a green reserved PR merges now. Do not wait for a chat.
-    if let Some(pr) = facts.open_prs.iter().find(|p| may_merge(p)) {
-        let idx = reserved_group_index(&pr.files).expect("may_merge requires one reserved group");
+    // Lander: a green leftover PR merges now. Do not wait for a chat.
+    if let Some(pr) = facts.open_prs.iter().find(|p| may_merge(p, &leftovers)) {
+        let idx = leftovers
+            .group_index(&pr.files)
+            .expect("may_merge requires one leftover group");
         return PulseDecision {
             kind: PulseKind::Merge,
             leftover: if unused.contains(&idx) {
-                leftover_label(idx)
+                leftovers.label(idx)
             } else {
                 leftover
             },
             leftover_hole: if unused.contains(&idx) {
-                leftover_hole(idx).to_string()
+                leftovers.hole(idx)
             } else {
                 hole
             },
             pr: Some(pr.number),
             reason: format!(
-                "lander: reserved leftover {} is green; merge PR #{} without a chat",
-                leftover_label(idx),
+                "lander: leftover {} is green; merge PR #{} without a chat",
+                leftovers.label(idx),
                 pr.number
             ),
         };
@@ -339,7 +480,7 @@ pub fn decide(facts: &PulseFacts) -> PulseDecision {
 
     if let Some(idx) = unused.first().copied() {
         let open_for = facts.open_prs.iter().find(|p| {
-            reserved_group_index(&p.files) == Some(idx) && !is_never_remmerge(p.number)
+            leftovers.group_index(&p.files) == Some(idx) && !is_never_remmerge(p.number)
         });
         match open_for {
             Some(pr) => PulseDecision {
@@ -348,9 +489,9 @@ pub fn decide(facts: &PulseFacts) -> PulseDecision {
                 leftover_hole: hole,
                 pr: Some(pr.number),
                 reason: format!(
-                    "WAIT: reserved PR #{}: {}",
+                    "WAIT: leftover PR #{}: {}",
                     pr.number,
-                    merge_block(pr).unwrap_or("incomplete evidence")
+                    merge_block(pr, &leftovers).unwrap_or("incomplete evidence")
                 ),
             },
             None => PulseDecision {
@@ -358,7 +499,7 @@ pub fn decide(facts: &PulseFacts) -> PulseDecision {
                 leftover,
                 leftover_hole: hole,
                 pr: None,
-                reason: "no reserved PR open; name the next unused leftover".into(),
+                reason: "no leftover PR open; name the next unused named suite path".into(),
             },
         }
     } else {
@@ -367,40 +508,48 @@ pub fn decide(facts: &PulseFacts) -> PulseDecision {
             leftover,
             leftover_hole: hole,
             pr: None,
-            reason: "all reserved leftovers have a green merged PR; do not invent a fifth product"
-                .into(),
+            reason:
+                "all named suite leftovers have a green merged PR; do not invent a fifth product"
+                    .into(),
         }
     }
 }
 
 pub fn render_brief(facts: &PulseFacts, decision: &PulseDecision) -> String {
-    let unused = unused_groups(&facts.merged_prs);
+    let leftovers = LeftoverSet::from_roadmap(&facts.roadmap);
+    let unused = leftovers.unused(&facts.merged_prs);
     let mut out = String::from("# Next leftover\n\n");
     if decision.leftover.is_empty() {
         out.push_str("Named leftover: _(none)_\n\n");
         out.push_str(
-            "All reserved suite leftovers have a green merged PR. Do not invent a fifth product. Do not invent a `src/workers.rs` lane.\n\n",
+            "All named suite leftovers have a green merged PR. Do not invent a fifth product. Do not invent a `src/workers.rs` lane.\n\n",
         );
     } else {
         out.push_str(&format!("Named leftover: `{}`\n\n", decision.leftover));
         out.push_str(&format!("Fail-closed hole: {}\n\n", decision.leftover_hole));
     }
-    out.push_str("Reserved leftover paths, in order, one owner:\n\n");
-    for (i, group) in RESERVED.iter().enumerate() {
+    out.push_str(
+        "Named leftover paths from `docs/SUITE_ROADMAP.md` suite modules, in order, one owner:\n\n",
+    );
+    for (i, group) in leftovers.groups.iter().enumerate() {
         let state = if unused.contains(&i) {
             "UNUSED"
         } else {
             "used on main"
         };
-        out.push_str(&format!("1. `{}` — {state}\n", group.join("` + `")));
+        out.push_str(&format!("1. `{}` — {state}\n", group.paths.join("` + `")));
     }
     out.push_str("\nThe shop pulse is the lander. Orchestrator is not in the loop.\n\n");
-    out.push_str("- MERGE only when both `Linux tests` and `Windows release` conclusions are success, and the `src/` write set is exactly one reserved leftover (or a subset of one reserved group).\n");
+    out.push_str("- MERGE only when both `Linux tests` and `Windows release` conclusions are success, and the `src/` write set is exactly one leftover path (or a subset of one leftover group).\n");
     out.push_str("- NEVER merge `src/workers.rs`, `src/runner.rs`, `src/worktree.rs`, `src/procwait.rs`.\n");
-    out.push_str("- NEVER remmerge PRs #8–#18. Close invented `workers.rs` PRs.\n");
+    out.push_str("- NEVER remmerge PRs #8–#29. Close invented `workers.rs` PRs.\n");
     out.push_str("- AASM stays look-only. Do not vendor AASM. Do not write `C:\\TextPCB Platform`. Do not open a TextPCB product lane.\n");
     out.push_str("- Missing evidence is WAIT, never default PASS.\n");
-    out.push_str(&format!("\nPulse: {} — {}\n", kind_word(decision.kind), decision.reason));
+    out.push_str(&format!(
+        "\nPulse: {} — {}\n",
+        kind_word(decision.kind),
+        decision.reason
+    ));
     out
 }
 
