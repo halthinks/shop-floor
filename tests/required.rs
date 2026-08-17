@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use serde_json::json;
 use shop::error::ShopError;
+use shop::mailbox::STEER_TO;
 use shop::mailbox::{AssignRecord, CLAIM_CEILING, DEFAULT_FROM, SCHEMA_VERSION};
 use shop::skills::GitHubSkills;
 use shop::types::{Child, ChildState, EvidenceStatus, ParentState};
@@ -294,23 +295,69 @@ fn split_cannot_target_unknown_peer() {
 }
 
 #[test]
-fn ui_page_serves_add_worker_form_and_intelligence_control() {
+fn ui_serves_command_center_structure() {
+    assert!(PAGE.contains("id=\"command-center\""));
+    assert!(PAGE.contains("id=\"workers\""));
+    assert!(PAGE.contains("id=\"floor\""));
+    assert!(PAGE.contains("id=\"github\""));
+    assert!(PAGE.contains("id=\"mailbox\""));
     assert!(PAGE.contains("id=\"add-worker\""));
-    assert!(PAGE.contains("id=\"intelligence-backend\"") || PAGE.contains("name=\"backend\""));
-    assert!(PAGE.contains("id=\"intelligence-model\"") || PAGE.contains("name=\"model\""));
+    assert!(PAGE.contains("id=\"intelligence-backend\""));
+    assert!(PAGE.contains("WORKERS"));
+    assert!(PAGE.contains("FLOOR"));
+    assert!(PAGE.contains("GITHUB"));
+    assert!(PAGE.contains("CONTROL"));
+    assert!(PAGE.contains("FEED"));
+    assert!(PAGE.contains("MAILBOX"));
+    assert!(PAGE.contains("SuperGrokHeavy"));
+    assert!(PAGE.contains("action-pill"));
+    assert!(PAGE.contains("LOCAL"));
+    assert!(PAGE.contains("GITHUB"));
+    assert!(PAGE.contains("id=\"steer-input\""));
+    assert!(PAGE.contains("id=\"project-switcher\""));
+    assert!(PAGE.contains("Open folder") || PAGE.contains("open-folder"));
+    assert!(PAGE.contains("Recents") || PAGE.contains("id=\"recents\""));
+    assert!(!PAGE.contains("<pre"));
 
     let (shop, _dir) = fresh();
     let (addr, _h) = ui::spawn(shop, 0).unwrap();
-    let html = http_get(&format!("{}:{}", addr.ip(), addr.port()), "/");
-    assert!(
-        html.contains("id=\"add-worker\""),
-        "served HTML must include the add-worker form"
-    );
+    let host = format!("{}:{}", addr.ip(), addr.port());
+    let html = http_get(&host, "/");
+    assert!(html.contains("id=\"command-center\""));
+    assert!(html.contains("id=\"workers\""));
+    assert!(html.contains("id=\"floor\""));
+    assert!(html.contains("id=\"github\""));
+    assert!(html.contains("id=\"mailbox\""));
+    assert!(html.contains("id=\"control\""));
+    assert!(html.contains("id=\"feed\""));
+    assert!(html.contains("SuperGrokHeavy"));
+    assert!(html.contains("LOCAL"));
     assert!(
         html.contains("intelligence-backend") || html.contains("name=\"backend\""),
-        "served HTML must include an intelligence control"
+        "command center must include an intelligence control"
     );
-    assert!(html.contains("github-panel") || html.contains("GitHub"));
+    let css = http_get(&host, "/ui.css");
+    assert!(css.contains("#09090b") || css.contains("--bg"));
+    let feed = http_get(&host, "/feed.xml");
+    assert!(feed.contains("<feed") || feed.contains("<channel"));
+}
+
+#[test]
+fn seeded_workers_are_on_the_roster() {
+    let (shop, _dir) = fresh();
+    let peers: Vec<String> = shop
+        .workers()
+        .unwrap()
+        .workers
+        .into_iter()
+        .map(|w| w.peer)
+        .collect();
+    for need in ["cursor", "grok-ultra", "grok-bot", "cursor-groksuperheavy"] {
+        assert!(
+            peers.iter().any(|p| p == need),
+            "missing seeded worker {need}"
+        );
+    }
 }
 
 #[test]
@@ -397,6 +444,99 @@ fn github_skills_mock_never_hits_live_api() {
 }
 
 #[test]
+fn mailbox_assign_writes_inbox_json_shape() {
+    let dir = tmp_store();
+    let mailbox = dir.join("bridge");
+    fs::create_dir_all(mailbox.join("inbox")).unwrap();
+    let mut shop = Shop::init(dir.join("store"))
+        .unwrap()
+        .with_mailbox(Some(mailbox.clone()));
+    enroll(&mut shop, &["alice"]);
+    shop.open("P", "t", "b").unwrap();
+    shop.split("P", "c1", "alice", "only", "t", "body").unwrap();
+    shop.assign("P").unwrap();
+    let path = mailbox.join("inbox/alice/assign-P-c1.json");
+    assert!(path.is_file());
+    let v: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(v["schema_version"], SCHEMA_VERSION);
+    assert_eq!(v["type"], "assign");
+    assert_eq!(v["to"], "alice");
+    assert_eq!(v["lane_id"], "c1");
+}
+
+#[test]
+fn status_reports_unread_and_wait() {
+    let (shop, _dir) = fresh();
+    let text = shop.status(None).unwrap();
+    assert!(text.contains("WAIT") || text.contains("unread"));
+    let a = shop.awareness(None).unwrap();
+    assert!(a.mailbox.wait.is_some() || a.github.wait.is_some() || !a.waits.is_empty());
+
+    let dir = tmp_store();
+    let mailbox = dir.join("bridge");
+    fs::create_dir_all(mailbox.join("inbox/alice")).unwrap();
+    fs::write(mailbox.join("inbox/alice/assign-P-c1.json"), "{}").unwrap();
+    let mut shop = Shop::init(dir.join("store"))
+        .unwrap()
+        .with_mailbox(Some(mailbox));
+    enroll(&mut shop, &["alice"]);
+    let a = shop.awareness(None).unwrap();
+    assert!(a.mailbox.unread_total >= 1);
+    let text = shop.status(None).unwrap();
+    assert!(text.contains("unread"));
+}
+
+#[test]
+fn verify_fail_blocks_merge() {
+    let mock = Arc::new(
+        MockGitHub::authed()
+            .with_create_pr(true)
+            .with_checks_pass(true),
+    );
+    let dir = tmp_store();
+    let mut shop = Shop::init(&dir).unwrap().with_github(mock.clone());
+    enroll(&mut shop, &["alice"]);
+    shop.github_connect("acme/widget", Some("main"), None)
+        .unwrap();
+    shop.open("P", "t", "b").unwrap();
+    shop.split("P", "c1", "alice", "a", "t", "b").unwrap();
+    shop.accept("P", "c1", r#"{"status":"PASS"}"#).unwrap();
+    shop.join("P").unwrap();
+    shop.reduce("P", "note").unwrap();
+    let rec = shop.verify("P", Some("false")).unwrap();
+    assert_eq!(rec.status, EvidenceStatus::Wait);
+    assert!(matches!(
+        shop.merge_verified("P").unwrap_err(),
+        ShopError::Wait(_)
+    ));
+    assert!(!mock.merged());
+}
+
+#[test]
+fn verify_pass_allows_merge_record() {
+    let mock = Arc::new(
+        MockGitHub::authed()
+            .with_create_pr(true)
+            .with_create_branch(true)
+            .with_checks_pass(true),
+    );
+    let dir = tmp_store();
+    let mut shop = Shop::init(&dir).unwrap().with_github(mock.clone());
+    enroll(&mut shop, &["alice"]);
+    shop.github_connect("acme/widget", Some("main"), None)
+        .unwrap();
+    shop.open("P", "t", "b").unwrap();
+    shop.split("P", "c1", "alice", "a", "t", "b").unwrap();
+    shop.accept("P", "c1", r#"{"status":"PASS"}"#).unwrap();
+    shop.join("P").unwrap();
+    shop.reduce("P", "note").unwrap();
+    let rec = shop.verify("P", Some("true")).unwrap();
+    assert_eq!(rec.status, EvidenceStatus::Pass);
+    shop.merge_verified("P").unwrap();
+    assert!(mock.merged() || shop.state().unwrap().parents["P"].github_merged);
+}
+
+#[test]
 fn reduce_never_auto_merges() {
     let mock = Arc::new(MockGitHub::authed().with_create_pr(true));
     let dir = tmp_store();
@@ -414,6 +554,109 @@ fn reduce_never_auto_merges() {
     assert!(!mock.merged());
 }
 
+#[test]
+fn events_append_on_add_worker() {
+    let (mut shop, dir) = fresh();
+    shop.add_worker("alice", "Alice", "grok-bot", "", true)
+        .unwrap();
+    let log = fs::read_to_string(dir.join("events.jsonl")).unwrap();
+    assert!(log.contains("add_worker"));
+    assert!(log.contains("alice"));
+    assert!(log.contains("cursor-groksuperheavy"));
+}
+
+#[test]
+fn steer_status_is_a_shop_line() {
+    let (mut shop, _dir) = fresh();
+    let v = shop.steer("status").unwrap();
+    assert_eq!(v["kind"], "shop");
+    let text = shop.steer_transcript();
+    let joined = text.iter().map(|l| l.to_string()).collect::<String>();
+    assert!(joined.contains("status") || joined.contains("WORKERS") || joined.contains("shop"));
+}
+
+#[test]
+fn steer_free_text_goes_to_supergrokheavy_not_grok_bot() {
+    let dir = tmp_store();
+    let mailbox = dir.join("bridge");
+    fs::create_dir_all(mailbox.join("inbox")).unwrap();
+    let mut shop = Shop::init(dir.join("store"))
+        .unwrap()
+        .with_mailbox(Some(mailbox.clone()));
+    let v = shop.steer("please look at the floor").unwrap();
+    assert_eq!(v["to"], STEER_TO);
+    assert_eq!(STEER_TO, "cursor-groksuperheavy");
+    assert_ne!(STEER_TO, "grok-bot");
+    let log = fs::read_to_string(dir.join("store/steer.jsonl")).unwrap();
+    assert!(log.contains("please look at the floor"));
+    let inbox = mailbox.join("inbox/cursor-groksuperheavy");
+    let found = fs::read_dir(&inbox)
+        .unwrap()
+        .flatten()
+        .any(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"));
+    assert!(found, "steer JSON must land in SuperGrokHeavy inbox");
+    let rec: serde_json::Value = fs::read_dir(&inbox)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+        .map(|p| serde_json::from_slice(&fs::read(p).unwrap()).unwrap())
+        .unwrap();
+    assert_eq!(rec["type"], "steer");
+    assert_eq!(rec["to"], "cursor-groksuperheavy");
+    assert_eq!(rec["from"], "user");
+}
+
+#[test]
+fn steer_free_text_does_not_invent_a_split() {
+    let (mut shop, _dir) = fresh();
+    shop.steer("split the work please").unwrap();
+    assert!(shop.state().unwrap().parents.is_empty());
+}
+
+#[test]
+fn open_project_a_then_b_switches_store() {
+    let recents = tmp_store().join("recents.json");
+    let a = tmp_store().join("proj-a");
+    let b = tmp_store().join("proj-b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    let mut shop = Shop::open_project_with_recents(&a, &recents).unwrap();
+    shop.open("PA", "a", "a").unwrap();
+    assert!(shop.store_root().starts_with(&a) || shop.project_root() == a);
+    let shop_b = Shop::open_project_with_recents(&b, &recents).unwrap();
+    assert!(shop_b.state().unwrap().parents.get("PA").is_none());
+    assert_eq!(shop_b.project_root(), b.as_path());
+    let rec = fs::read_to_string(&recents).unwrap();
+    assert!(rec.contains("proj-a"));
+    assert!(rec.contains("proj-b"));
+}
+
+#[test]
+fn open_github_repo_sets_record_without_a_lane() {
+    let (mut shop, dir) = fresh();
+    shop.steer("open repo halthinks/shop-floor").unwrap();
+    let repo = shop.github_repo().unwrap().unwrap();
+    assert_eq!(repo.slug(), "halthinks/shop-floor");
+    assert!(dir.join("github.json").is_file());
+    assert!(shop.state().unwrap().parents.is_empty());
+}
+
+#[test]
+fn refuse_platform_project_path() {
+    let recents = tmp_store().join("recents.json");
+    match Shop::open_project_with_recents(r"C:\TextPCB Platform", &recents) {
+        Ok(_) => panic!("expected ForbiddenWrite"),
+        Err(ShopError::ForbiddenWrite(_)) => {}
+        Err(e) => panic!("expected ForbiddenWrite, got {e}"),
+    }
+    match Shop::open_project_with_recents(r"C:\\TextPCB Platform", &recents) {
+        Ok(_) => panic!("expected ForbiddenWrite"),
+        Err(ShopError::ForbiddenWrite(_)) => {}
+        Err(e) => panic!("expected ForbiddenWrite, got {e}"),
+    }
+}
+
 fn http_get(addr: &str, path: &str) -> String {
     let mut last = String::new();
     for _ in 0..40 {
@@ -424,7 +667,11 @@ fn http_get(addr: &str, path: &str) -> String {
                 let mut buf = Vec::new();
                 let _ = s.read_to_end(&mut buf);
                 last = String::from_utf8_lossy(&buf).into_owned();
-                if last.contains("id=\"add-worker\"") || last.starts_with("HTTP/1.1 200") {
+                if last.contains("id=\"command-center\"")
+                    || last.contains("id=\"add-worker\"")
+                    || last.contains("--bg")
+                    || last.starts_with("HTTP/1.1 200")
+                {
                     return last;
                 }
             }

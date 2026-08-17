@@ -11,26 +11,31 @@
 //! - shop never invents a child lane. Only `shop split` creates children.
 //! - shop never writes outside the shop store and optional mailbox outbox.
 
+pub mod awareness;
 pub mod cli;
 pub mod engine;
 pub mod error;
+pub mod feed;
 pub mod github;
 pub mod hash;
 pub mod mailbox;
 pub mod paths;
+pub mod project;
 pub mod secret_scan;
 pub mod skills;
 pub mod skills_live;
 pub mod skills_mock;
+pub mod steer;
 pub mod store;
 pub mod types;
 pub mod ui;
 pub mod workers;
 
+pub use awareness::Awareness;
 pub use engine::Shop;
 pub use error::{Result, ShopError};
 pub use github::GitHubRepo;
-pub use mailbox::{AssignRecord, CLAIM_CEILING, DEFAULT_FROM, SCHEMA_VERSION};
+pub use mailbox::{AssignRecord, MailboxObservation, CLAIM_CEILING, DEFAULT_FROM, SCHEMA_VERSION};
 pub use skills::{GitHubSkills, NullGitHub, SKILL_PACK};
 pub use skills_mock::MockGitHub;
 pub use types::{

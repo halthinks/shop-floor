@@ -12,6 +12,8 @@ pub enum Backend {
     Cursor,
     #[serde(rename = "cursor-ultra")]
     CursorUltra,
+    #[serde(rename = "grok-ultra")]
+    GrokUltra,
     #[serde(rename = "grok-bot")]
     GrokBot,
     #[serde(rename = "grok-build")]
@@ -23,6 +25,7 @@ impl Backend {
         match raw.trim() {
             "cursor" => Ok(Self::Cursor),
             "cursor-ultra" => Ok(Self::CursorUltra),
+            "grok-ultra" => Ok(Self::GrokUltra),
             "grok-bot" => Ok(Self::GrokBot),
             "grok-build" => Ok(Self::GrokBuild),
             other => Err(ShopError::UnknownBackend(other.to_string())),
@@ -33,13 +36,14 @@ impl Backend {
         match self {
             Self::Cursor => "cursor",
             Self::CursorUltra => "cursor-ultra",
+            Self::GrokUltra => "grok-ultra",
             Self::GrokBot => "grok-bot",
             Self::GrokBuild => "grok-build",
         }
     }
 
     pub fn allows_empty_model(self) -> bool {
-        matches!(self, Self::GrokBot | Self::GrokBuild)
+        matches!(self, Self::GrokUltra | Self::GrokBot | Self::GrokBuild)
     }
 }
 
@@ -76,6 +80,14 @@ pub struct WorkerRoster {
     #[serde(default)]
     pub workers: Vec<Worker>,
 }
+
+/// Floor roster shown on first init. Capacity only — not jobs, not lanes.
+pub const SEEDED_WORKERS: &[(&str, &str)] = &[
+    ("cursor", "cursor"),
+    ("grok-ultra", "grok-ultra"),
+    ("grok-bot", "grok-bot"),
+    ("cursor-groksuperheavy", "cursor"),
+];
 
 impl WorkerRoster {
     pub fn get(&self, peer: &str) -> Option<&Worker> {

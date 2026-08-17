@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
 use crate::engine::Shop;
-use crate::mailbox::DEFAULT_FROM;
+use crate::mailbox::{resolve_mailbox, DEFAULT_FROM};
 use crate::skills_live::LiveGitHub;
 use crate::types::{EvidenceStatus, ParentState};
 use crate::ui::{self, DEFAULT_PORT};
@@ -41,7 +41,7 @@ pub struct Cli {
 pub enum Commands {
     /// Create a shop store (default `.shop/` in cwd)
     Init { dir: Option<PathBuf> },
-    /// Open the local shop UI (add worker + assign intelligence)
+    /// Open the command center
     Ui {
         #[arg(long, default_value_t = DEFAULT_PORT)]
         port: u16,
@@ -132,6 +132,18 @@ pub enum Commands {
     },
     /// Close only from VERIFIED
     Close { parent: String },
+    /// Merge the reduce PR. Blocked until verify PASS / VERIFIED. No prompt.
+    Merge { parent: String },
+    /// Open a local project folder or list recents
+    Project {
+        #[command(subcommand)]
+        cmd: ProjectCmd,
+    },
+    /// Print the event tail (same events as /feed.xml)
+    Log {
+        #[arg(long, default_value_t = 40)]
+        n: usize,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -147,6 +159,14 @@ pub enum GithubCmd {
     },
 }
 
+#[derive(Subcommand, Debug)]
+pub enum ProjectCmd {
+    /// Open a local folder as the shop project (`<path>/.shop`)
+    Open { path: PathBuf },
+    /// Print user-level recents (`~/.shop/recents.json`)
+    Recent,
+}
+
 pub fn run() -> Result<()> {
     run_cli(Cli::parse())
 }
@@ -155,15 +175,35 @@ pub fn run_cli(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Init { dir } => {
             let root = dir.unwrap_or(cli.store);
+            let mailbox = resolve_mailbox(cli.mailbox, &root);
             let shop = Shop::init(&root)?
-                .with_mailbox(cli.mailbox)
+                .with_mailbox(Some(mailbox))
                 .with_from(cli.from);
             println!("initialized shop store {}", shop.store_root().display());
             Ok(())
         }
+        Commands::Project { cmd } => match cmd {
+            ProjectCmd::Open { path } => {
+                let shop = Shop::open_project(&path)?;
+                println!(
+                    "opened project {} store {}",
+                    shop.project_root().display(),
+                    shop.store_root().display()
+                );
+                Ok(())
+            }
+            ProjectCmd::Recent => {
+                print!(
+                    "{}",
+                    crate::project::format_recents(&crate::project::default_recents_path())
+                );
+                Ok(())
+            }
+        },
         Commands::Ui { port } | Commands::Serve { port } => {
+            let mailbox = resolve_mailbox(cli.mailbox, &cli.store);
             let shop = ui::ensure_store(cli.store.clone())?
-                .with_mailbox(cli.mailbox)
+                .with_mailbox(Some(mailbox))
                 .with_from(cli.from);
             let live = std::sync::Arc::new(LiveGitHub::detect(shop.store_root()));
             let shop = shop.with_github(live);
@@ -171,10 +211,13 @@ pub fn run_cli(cli: Cli) -> Result<()> {
             Ok(())
         }
         other => {
+            let mailbox = resolve_mailbox(cli.mailbox, &cli.store);
             let mut shop = Shop::open_store(&cli.store)
                 .with_context(|| format!("open store {}", cli.store.display()))?
-                .with_mailbox(cli.mailbox)
+                .with_mailbox(Some(mailbox))
                 .with_from(cli.from);
+            let live = std::sync::Arc::new(LiveGitHub::detect(shop.store_root()));
+            shop = shop.with_github(live);
             dispatch(&mut shop, other)
         }
     }
@@ -182,7 +225,13 @@ pub fn run_cli(cli: Cli) -> Result<()> {
 
 fn dispatch(shop: &mut Shop, command: Commands) -> Result<()> {
     match command {
-        Commands::Init { .. } | Commands::Ui { .. } | Commands::Serve { .. } => unreachable!(),
+        Commands::Init { .. }
+        | Commands::Ui { .. }
+        | Commands::Serve { .. }
+        | Commands::Project { .. } => unreachable!(),
+        Commands::Log { n } => {
+            print!("{}", shop.event_log(n));
+        }
         Commands::Add {
             peer,
             name,
@@ -307,6 +356,10 @@ fn dispatch(shop: &mut Shop, command: Commands) -> Result<()> {
         }
         Commands::Close { parent } => match shop.close(&parent) {
             Ok(_) => println!("closed {parent}"),
+            Err(e) => bail!("{e}"),
+        },
+        Commands::Merge { parent } => match shop.merge_verified(&parent) {
+            Ok(_) => println!("merged {parent} (verify PASS recorded)"),
             Err(e) => bail!("{e}"),
         },
     }

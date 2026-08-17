@@ -67,7 +67,7 @@ pub enum ShopError {
     #[error("duplicate worker peer '{0}'")]
     DuplicatePeer(String),
 
-    #[error("unknown intelligence backend '{0}' (cursor | cursor-ultra | grok-bot | grok-build)")]
+    #[error("unknown intelligence backend '{0}' (cursor | cursor-ultra | grok-ultra | grok-bot | grok-build)")]
     UnknownBackend(String),
 
     #[error("unknown GitHub skill '{0}'")]

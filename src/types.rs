@@ -181,6 +181,12 @@ pub struct Parent {
     pub github_pr_status: Option<EvidenceStatus>,
     #[serde(default)]
     pub github_pr_reason: Option<String>,
+    #[serde(default)]
+    pub github_merged: bool,
+    #[serde(default)]
+    pub github_merge_status: Option<EvidenceStatus>,
+    #[serde(default)]
+    pub github_merge_reason: Option<String>,
     pub opened_at: u64,
     pub updated_at: u64,
 }
@@ -201,6 +207,9 @@ impl Parent {
             github_pr_number: None,
             github_pr_status: None,
             github_pr_reason: None,
+            github_merged: false,
+            github_merge_status: None,
+            github_merge_reason: None,
             opened_at: now,
             updated_at: now,
         }

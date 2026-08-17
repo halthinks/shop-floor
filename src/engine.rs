@@ -15,12 +15,21 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
+use crate::awareness::{
+    Awareness, ChildView, GitHubAwareness, ParentView, ProjectView, WorkerView,
+};
 use crate::error::{Result, ShopError};
 use crate::github::{child_branch_name, GitHubRepo};
 use crate::hash::{fingerprint, unix_now};
-use crate::mailbox::{write_assign, AssignRecord, DEFAULT_FROM};
+use crate::mailbox::{observe, write_assign, AssignRecord, MailboxObservation, DEFAULT_FROM};
 use crate::paths::{parse_paths, paths_overlap};
+use crate::project::{
+    default_recents_path, format_recents, load_recents, origin_github_slug, project_name,
+    project_root_from_store, recent_path_for_repo, record_recent, refuse_platform,
+    slugs_from_github_search, store_dir_for, touch_recent_github,
+};
 use crate::skills::{GitHubSkills, NullGitHub};
+use crate::steer::{parse_steer, steer_to_supergrok, SteerLine, SteerVerb};
 use crate::store::Store;
 use crate::types::{
     Child, ChildState, Claim, EvidenceStatus, Handoff, Parent, ParentState, ReduceChild,
@@ -31,28 +40,111 @@ use crate::workers::{Backend, Intelligence, Worker, WorkerRoster};
 #[derive(Clone)]
 pub struct Shop {
     store: Store,
+    project_root: PathBuf,
+    recents_path: PathBuf,
     mailbox: Option<PathBuf>,
     from: String,
     github: Arc<dyn GitHubSkills>,
 }
 
 impl Shop {
-    pub fn init(store: impl AsRef<Path>) -> Result<Self> {
-        Ok(Self {
-            store: Store::init(store)?,
-            mailbox: None,
+    fn from_store(store: Store) -> Self {
+        let root = store.root().to_path_buf();
+        Self {
+            project_root: project_root_from_store(&root),
+            recents_path: root.join("recents.json"),
+            mailbox: Some(root.join("mailbox")),
+            store,
             from: DEFAULT_FROM.to_string(),
             github: Arc::new(NullGitHub),
-        })
+        }
+    }
+
+    pub fn init(store: impl AsRef<Path>) -> Result<Self> {
+        let store = Store::init(store)?;
+        let mut shop = Self::from_store(store);
+        shop.ensure_seeded_workers()?;
+        Ok(shop)
     }
 
     pub fn open_store(store: impl AsRef<Path>) -> Result<Self> {
-        Ok(Self {
-            store: Store::open(store)?,
-            mailbox: None,
-            from: DEFAULT_FROM.to_string(),
-            github: Arc::new(NullGitHub),
-        })
+        let store = Store::open(store)?;
+        let mut shop = Self::from_store(store);
+        shop.ensure_seeded_workers()?;
+        Ok(shop)
+    }
+
+    pub fn with_recents_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.recents_path = path.into();
+        self
+    }
+
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    pub fn recents_path(&self) -> &Path {
+        &self.recents_path
+    }
+
+    /// Open a project folder. Creates `.shop` if missing. Refuses Platform paths.
+    pub fn open_project(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_project_with_recents(path, default_recents_path())
+    }
+
+    pub fn open_project_with_recents(
+        path: impl AsRef<Path>,
+        recents_path: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let path = path.as_ref();
+        refuse_platform(path)?;
+        refuse_platform(recents_path.as_ref())?;
+        let store_dir = store_dir_for(path)?;
+        refuse_platform(&store_dir)?;
+        if let Some(parent) = store_dir.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut shop =
+            if store_dir.join("meta.json").exists() || store_dir.join("snapshot.json").exists() {
+                Shop::open_store(&store_dir)?
+            } else {
+                Shop::init(&store_dir)?
+            };
+        shop.project_root = project_root_from_store(shop.store.root());
+        if shop.project_root.as_os_str().is_empty() {
+            shop.project_root = path.to_path_buf();
+        }
+        shop.recents_path = recents_path.as_ref().to_path_buf();
+        let slug = shop.github_repo().ok().flatten().map(|r| r.slug());
+        record_recent(&shop.recents_path, &shop.project_root, slug.as_deref())?;
+        if let Some(origin) = origin_github_slug(&shop.project_root) {
+            let _ = shop.github_connect(&origin, None, None);
+        }
+        Ok(shop)
+    }
+
+    /// Live GitHub repo list. WAIT if unauthenticated. Never invent slugs.
+    pub fn github_repo_catalog(&self) -> Value {
+        if !self.github.authenticated() {
+            return json!("WAIT");
+        }
+        match self
+            .github
+            .invoke("repos.search", json!({"query": "user:halthinks"}))
+        {
+            Ok(v) => json!(slugs_from_github_search(&v)),
+            Err(e) => json!(format!("WAIT: {e}")),
+        }
+    }
+
+    fn ensure_seeded_workers(&mut self) -> Result<()> {
+        if !self.store.load_workers()?.workers.is_empty() {
+            return Ok(());
+        }
+        for (peer, backend) in crate::workers::SEEDED_WORKERS {
+            self.add_worker(peer, peer, backend, "", true)?;
+        }
+        Ok(())
     }
 
     pub fn with_github(mut self, github: Arc<dyn GitHubSkills>) -> Self {
@@ -61,8 +153,12 @@ impl Shop {
     }
 
     pub fn with_mailbox(mut self, mailbox: Option<PathBuf>) -> Self {
-        self.mailbox = mailbox;
+        self.mailbox = Some(mailbox.unwrap_or_else(|| self.store.root().join("mailbox")));
         self
+    }
+
+    pub fn mailbox_root(&self) -> Option<&Path> {
+        self.mailbox.as_deref()
     }
 
     pub fn with_from(mut self, from: impl Into<String>) -> Self {
@@ -76,6 +172,14 @@ impl Shop {
 
     pub fn github_skills(&self) -> &dyn GitHubSkills {
         self.github.as_ref()
+    }
+
+    pub fn github_arc(&self) -> Arc<dyn GitHubSkills> {
+        self.github.clone()
+    }
+
+    pub fn from_name(&self) -> &str {
+        &self.from
     }
 
     pub fn add_worker(
@@ -172,6 +276,7 @@ impl Shop {
         if let Some(token) = token.map(str::trim).filter(|s| !s.is_empty()) {
             self.store.write_token(token)?;
         }
+        let _ = touch_recent_github(&self.recents_path, &self.project_root, &repo.slug());
         self.event(json!({
             "op": "github_connect",
             "repo": repo.slug(),
@@ -447,6 +552,15 @@ impl Shop {
             "parent": parent_id,
             "count": records.len(),
         }))?;
+        if !records.is_empty() {
+            if let Some(w) = self.observe_mailbox().wait {
+                self.event(json!({
+                    "op": "mailbox_wait",
+                    "parent": parent_id,
+                    "note": w,
+                }))?;
+            }
+        }
         Ok(records)
     }
 
@@ -695,6 +809,100 @@ impl Shop {
         Ok(record)
     }
 
+    /// Merge is allowed only after verify recorded PASS / parent VERIFIED.
+    /// Missing PR, auth, or verify is WAIT — never a fake merge or PR URL.
+    pub fn merge_verified(&mut self, parent_id: &str) -> Result<Value> {
+        let repo = self.store.load_github()?;
+        let mut state = self.store.load()?;
+        let parent = state
+            .parents
+            .get_mut(parent_id)
+            .ok_or_else(|| ShopError::ParentNotFound(parent_id.to_string()))?;
+        let verified = parent.state == ParentState::Verified
+            && parent
+                .verify
+                .as_ref()
+                .is_some_and(|v| v.status == EvidenceStatus::Pass);
+        if !verified {
+            let reason =
+                "merge blocked until shop verify recorded PASS / parent VERIFIED".to_string();
+            parent.github_merge_status = Some(EvidenceStatus::Wait);
+            parent.github_merge_reason = Some(reason.clone());
+            self.store.save(&state)?;
+            self.event(json!({
+                "op": "merge_blocked",
+                "parent": parent_id,
+                "reason": reason,
+            }))?;
+            return Err(ShopError::Wait(reason));
+        }
+        let Some(n) = parent.github_pr_number else {
+            let reason = "no real PR; never fake a merge or a PR URL".to_string();
+            parent.github_merge_status = Some(EvidenceStatus::Wait);
+            parent.github_merge_reason = Some(reason.clone());
+            self.store.save(&state)?;
+            self.event(json!({
+                "op": "merge_blocked",
+                "parent": parent_id,
+                "reason": reason,
+            }))?;
+            return Err(ShopError::Wait(reason));
+        };
+        if !self.github.authenticated() {
+            let reason = "WAIT: GitHub token missing; never fake a merge".to_string();
+            parent.github_merge_status = Some(EvidenceStatus::Wait);
+            parent.github_merge_reason = Some(reason.clone());
+            self.store.save(&state)?;
+            self.event(json!({
+                "op": "merge_blocked",
+                "parent": parent_id,
+                "reason": reason,
+            }))?;
+            return Err(ShopError::Wait(reason));
+        }
+        let Some(repo) = repo else {
+            let reason = "WAIT: GitHub repo not connected; never fake a merge".to_string();
+            parent.github_merge_status = Some(EvidenceStatus::Wait);
+            parent.github_merge_reason = Some(reason.clone());
+            self.store.save(&state)?;
+            self.event(json!({
+                "op": "merge_blocked",
+                "parent": parent_id,
+                "reason": reason,
+            }))?;
+            return Err(ShopError::Wait(reason));
+        };
+        match self.github.invoke(
+            "pulls.merge",
+            json!({
+                "owner": repo.owner,
+                "repo": repo.name,
+                "pullNumber": n,
+            }),
+        ) {
+            Ok(v) => {
+                parent.github_merged = true;
+                parent.github_merge_status = Some(EvidenceStatus::Pass);
+                parent.github_merge_reason = None;
+                self.store.save(&state)?;
+                self.event(json!({
+                    "op": "merge",
+                    "parent": parent_id,
+                    "pull": n,
+                    "note": "automatic only after VERIFIED",
+                }))?;
+                Ok(v)
+            }
+            Err(e) => {
+                parent.github_merged = false;
+                parent.github_merge_status = Some(EvidenceStatus::Wait);
+                parent.github_merge_reason = Some(e.to_string());
+                self.store.save(&state)?;
+                Err(e)
+            }
+        }
+    }
+
     pub fn close(&mut self, parent_id: &str) -> Result<Parent> {
         let mut state = self.store.load()?;
         let verified = {
@@ -725,29 +933,235 @@ impl Shop {
         Ok(closed)
     }
 
-    pub fn status(&self, parent_id: Option<&str>) -> Result<String> {
+    pub fn observe_mailbox(&self) -> MailboxObservation {
+        observe(self.mailbox.as_deref(), &self.store.outbox_dir())
+    }
+
+    pub fn awareness(&self, parent_id: Option<&str>) -> Result<Awareness> {
         let state = self.store.load()?;
-        let mut out = format_status(&state, parent_id)?;
-        out.push_str("WORKERS\n");
         let roster = self.store.load_workers()?;
-        if roster.workers.is_empty() {
+        let mailbox = self.observe_mailbox();
+        let repo = self.store.load_github()?;
+        let authed = self.github.authenticated();
+        let github_wait = if repo.is_none() {
+            Some("WAIT: GitHub repo not connected".to_string())
+        } else if !authed {
+            Some(
+                "WAIT: GitHub token missing (.shop/github.token or GITHUB_TOKEN/GH_TOKEN or gh)"
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        let mut checks = json!("WAIT: missing PR or checks");
+        let mut issue_count = None;
+        let mut pr_count = None;
+        let mut check_count = None;
+        if let (Some(r), true) = (&repo, authed) {
+            if let Ok(v) = self
+                .github
+                .invoke("issues.list", json!({"owner": r.owner, "repo": r.name}))
+            {
+                if let Some(arr) = v.as_array() {
+                    issue_count = Some(arr.len() as u64);
+                }
+            }
+            if let Ok(v) = self
+                .github
+                .invoke("pulls.list", json!({"owner": r.owner, "repo": r.name}))
+            {
+                if let Some(arr) = v.as_array() {
+                    pr_count = Some(arr.len() as u64);
+                }
+            }
+            if let Some(parent) = parent_id.and_then(|id| state.parents.get(id)) {
+                if let Some(n) = parent.github_pr_number {
+                    checks = self
+                        .github
+                        .invoke(
+                            "pulls.read",
+                            json!({
+                                "owner": r.owner,
+                                "repo": r.name,
+                                "pullNumber": n,
+                                "method": "get_check_runs",
+                            }),
+                        )
+                        .unwrap_or_else(|e| json!({"WAIT": e.to_string()}));
+                    if let Some(arr) = checks.get("check_runs").and_then(|a| a.as_array()) {
+                        check_count = Some(arr.len() as u64);
+                    }
+                }
+            }
+        }
+        let parents: Vec<ParentView> = state
+            .parents
+            .values()
+            .filter(|p| parent_id.map(|id| p.id == id).unwrap_or(true))
+            .map(|p| ParentView {
+                id: p.id.clone(),
+                title: p.title.clone(),
+                state: p.state,
+                children: p
+                    .children
+                    .values()
+                    .map(|c| ChildView {
+                        id: c.id.clone(),
+                        peer: c.peer.clone(),
+                        state: c.state,
+                        paths: c.paths.clone(),
+                        branch: c.branch.clone(),
+                        dispatched: c.dispatched,
+                    })
+                    .collect(),
+                verify: p.verify.as_ref().map(|v| v.status),
+                github_pr_url: p.github_pr_url.clone(),
+                github_pr_status: p.github_pr_status,
+                github_merged: p.github_merged,
+                github_merge_status: p.github_merge_status,
+                github_merge_reason: p.github_merge_reason.clone(),
+            })
+            .collect();
+        let mut waits = Vec::new();
+        if let Some(w) = &mailbox.wait {
+            waits.push(w.clone());
+        }
+        if let Some(w) = &github_wait {
+            waits.push(w.clone());
+        }
+        for p in &parents {
+            if p.github_merge_status == Some(EvidenceStatus::Wait) {
+                if let Some(r) = &p.github_merge_reason {
+                    waits.push(format!("WAIT: merge {}: {r}", p.id));
+                }
+            }
+            if p.verify == Some(EvidenceStatus::Wait) {
+                waits.push(format!("WAIT: verify {} not PASS", p.id));
+            }
+        }
+        let workers: Vec<WorkerView> = roster
+            .workers
+            .into_iter()
+            .map(|w| WorkerView::from_worker(w, &parents, &mailbox))
+            .collect();
+        let mut events = self.store.load_events();
+        events.reverse();
+        if events.len() > 80 {
+            events.truncate(80);
+        }
+        Ok(Awareness {
+            store_ok: true,
+            project: ProjectView {
+                name: project_name(&self.project_root),
+                path: self.project_root.display().to_string(),
+                store: self.store.root().display().to_string(),
+            },
+            workers,
+            claims: state.claims,
+            parents,
+            mailbox,
+            github: GitHubAwareness {
+                repo: repo.as_ref().map(|r| r.slug()),
+                default_branch: repo.and_then(|r| r.default_branch),
+                authenticated: authed,
+                token_present: self.store.has_token_file() || authed,
+                wait: github_wait,
+                checks,
+                issue_count,
+                pr_count,
+                check_count,
+            },
+            events,
+            waits,
+        })
+    }
+
+    pub fn status(&self, parent_id: Option<&str>) -> Result<String> {
+        let a = self.awareness(parent_id)?;
+        let mut out = String::new();
+        out.push_str("STATUS (truth panel; missing pieces are WAIT, never invented)\n");
+        if !a.waits.is_empty() {
+            out.push_str("WAITS\n");
+            for w in &a.waits {
+                out.push_str(&format!("  {w}\n"));
+            }
+        }
+        out.push_str("WORKERS\n");
+        if a.workers.is_empty() {
             out.push_str("  (none; add via shop ui)\n");
         } else {
-            for w in &roster.workers {
+            for w in &a.workers {
                 out.push_str(&format!(
-                    "  {}  name={}  backend={}  model={}  github_skills={}\n",
-                    w.peer, w.name, w.intelligence.backend, w.intelligence.model, w.github_skills
+                    "  {}  name={}  backend={}  model={}  github_skills={}  action={}\n",
+                    w.peer,
+                    w.name,
+                    w.intelligence.backend,
+                    w.intelligence.model,
+                    w.github_skills,
+                    w.action
+                ));
+            }
+        }
+        out.push_str("PARENTS\n");
+        if a.parents.is_empty() {
+            out.push_str("  (none)\n");
+        } else {
+            for p in &a.parents {
+                out.push_str(&format!("  {}  {}\n", p.id, p.state));
+                for c in &p.children {
+                    out.push_str(&format!(
+                        "    child {}  {}  peer={}  paths={}\n",
+                        c.id,
+                        c.state,
+                        c.peer,
+                        c.paths.join(",")
+                    ));
+                }
+            }
+        }
+        out.push_str("CLAIMS\n");
+        if a.claims.is_empty() {
+            out.push_str("  (none)\n");
+        } else {
+            for claim in &a.claims {
+                out.push_str(&format!(
+                    "  {}/{}  peer={}  paths={}\n",
+                    claim.parent_id,
+                    claim.child_id,
+                    claim.peer,
+                    claim.paths.join(",")
+                ));
+            }
+        }
+        out.push_str("MAILBOX\n");
+        if let Some(w) = &a.mailbox.wait {
+            out.push_str(&format!("  {w}\n"));
+        } else {
+            out.push_str(&format!(
+                "  unread={}  outbox={}  root={}\n",
+                a.mailbox.unread_total,
+                a.mailbox.outbox_count,
+                a.mailbox.root.as_deref().unwrap_or("?")
+            ));
+            for p in &a.mailbox.peers {
+                out.push_str(&format!(
+                    "  peer={} unread={} latest_assign={} latest_handoff={}\n",
+                    p.peer,
+                    p.unread,
+                    p.latest_assign.as_deref().unwrap_or("-"),
+                    p.latest_handoff.as_deref().unwrap_or("-")
                 ));
             }
         }
         out.push_str("GITHUB\n");
-        match self.store.load_github()? {
-            Some(r) => out.push_str(&format!(
-                "  connected {} default_branch={}\n",
-                r.slug(),
-                r.default_branch.as_deref().unwrap_or("(unset)")
-            )),
-            None => out.push_str("  (not connected)\n"),
+        if let Some(w) = &a.github.wait {
+            out.push_str(&format!("  {w}\n"));
+        }
+        if let Some(r) = &a.github.repo {
+            out.push_str(&format!(
+                "  repo={} auth={} token_present={}\n",
+                r, a.github.authenticated, a.github.token_present
+            ));
         }
         Ok(out)
     }
@@ -756,8 +1170,193 @@ impl Shop {
         self.store.load()
     }
 
-    fn event(&self, event: Value) -> Result<()> {
+    fn event(&self, mut event: Value) -> Result<()> {
+        if event.get("title").is_none() {
+            if let Some(op) = event.get("op").and_then(|v| v.as_str()) {
+                event["title"] = json!(crate::feed::event_title(op));
+            }
+        }
         self.store.append_event(&event)
+    }
+
+    pub fn events(&self) -> Vec<Value> {
+        self.store.load_events()
+    }
+
+    pub fn event_log(&self, n: usize) -> String {
+        crate::feed::format_log(&self.store.load_events(), n)
+    }
+
+    pub fn feed_atom(&self) -> String {
+        crate::feed::atom(&self.store.load_events())
+    }
+
+    pub fn feed_rss(&self) -> String {
+        crate::feed::rss(&self.store.load_events())
+    }
+
+    pub fn steer_transcript(&self) -> Vec<Value> {
+        self.store.load_steer()
+    }
+
+    pub fn recents(&self) -> crate::project::Recents {
+        load_recents(&self.recents_path)
+    }
+
+    pub fn recents_text(&self) -> String {
+        format_recents(&self.recents_path)
+    }
+
+    /// CONTROL plane. Local verbs run here. Free text goes to SuperGrokHeavy.
+    pub fn steer(&mut self, text: &str) -> Result<Value> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(ShopError::IncompleteEvidence("empty steer".into()));
+        }
+        let user = SteerLine::new("user", text, None);
+        self.store.append_steer(&user)?;
+
+        if let Some(verb) = parse_steer(text) {
+            let (body, wait) = self.run_steer_verb(verb)?;
+            let shop_line = SteerLine::new("shop", body, wait);
+            self.store.append_steer(&shop_line)?;
+            return Ok(json!({
+                "kind": "shop",
+                "line": shop_line,
+                "transcript": self.store.load_steer(),
+            }));
+        }
+
+        let (rec, _written, wait) =
+            steer_to_supergrok(&self.store.outbox_dir(), self.mailbox.as_deref(), text)?;
+        let mut line = SteerLine::new(
+            "shop",
+            format!("to SuperGrokHeavy ({})", rec.to),
+            wait.clone(),
+        );
+        line.to = Some(rec.to.clone());
+        self.store.append_steer(&line)?;
+        Ok(json!({
+            "kind": "steer",
+            "to": rec.to,
+            "type": rec.type_,
+            "wait": wait,
+            "line": line,
+            "transcript": self.store.load_steer(),
+        }))
+    }
+
+    fn run_steer_verb(&mut self, verb: SteerVerb) -> Result<(String, Option<String>)> {
+        match verb {
+            SteerVerb::Status => Ok((self.status(None)?, None)),
+            SteerVerb::Workers => {
+                let roster = self.workers()?;
+                let mut s = String::from("WORKERS\n");
+                for w in roster.workers {
+                    s.push_str(&format!(
+                        "  {}  {}  {}\n",
+                        w.peer, w.intelligence.backend, w.intelligence.model
+                    ));
+                }
+                Ok((s, None))
+            }
+            SteerVerb::Github => {
+                let repo = self.github_repo()?.map(|r| r.slug());
+                let wait = if self.github.authenticated() {
+                    None
+                } else {
+                    Some("WAIT: GitHub token missing".into())
+                };
+                Ok((
+                    format!(
+                        "github {}  auth={}",
+                        repo.as_deref().unwrap_or("not connected"),
+                        self.github.authenticated()
+                    ),
+                    wait,
+                ))
+            }
+            SteerVerb::AddWorker {
+                peer,
+                backend,
+                model,
+            } => {
+                let w = self.add_worker(&peer, &peer, &backend, &model, true)?;
+                Ok((
+                    format!("added worker {} backend={}", w.peer, w.intelligence.backend),
+                    None,
+                ))
+            }
+            SteerVerb::OpenParent { id, title } => {
+                self.open(&id, &title, "")?;
+                Ok((format!("opened parent {id} HELD"), None))
+            }
+            SteerVerb::Split {
+                parent,
+                child,
+                peer,
+                paths,
+            } => {
+                self.split(&parent, &child, &peer, &paths, &child, "")?;
+                Ok((
+                    format!("split {parent}/{child} peer={peer} paths={paths}"),
+                    None,
+                ))
+            }
+            SteerVerb::Assign { parent } => {
+                let n = self.assign(&parent)?.len();
+                Ok((format!("assign {parent} wrote {n} record(s)"), None))
+            }
+            SteerVerb::Join { parent } => {
+                let st = self.join(&parent)?;
+                Ok((format!("join {parent} -> {st}"), None))
+            }
+            SteerVerb::Reduce { parent, note } => {
+                self.reduce(&parent, &note)?;
+                Ok((format!("reduce {parent} -> REDUCED"), None))
+            }
+            SteerVerb::Verify { parent, cmd } => {
+                let rec = self.verify(&parent, cmd.as_deref())?;
+                Ok((format!("verify {parent} {}", rec.status), None))
+            }
+            SteerVerb::Bounce {
+                parent,
+                child,
+                reason,
+            } => {
+                self.bounce(&parent, &child, &reason)?;
+                Ok((format!("bounce {parent}/{child}"), None))
+            }
+            SteerVerb::OpenProject { path } => {
+                let next = Shop::open_project_with_recents(&path, &self.recents_path)?
+                    .with_github(self.github.clone())
+                    .with_from(self.from.clone())
+                    .with_recents_path(self.recents_path.clone());
+                let shown = next.project_root.display().to_string();
+                *self = next;
+                Ok((format!("opened project {shown}"), None))
+            }
+            SteerVerb::OpenRepo { spec } => {
+                let repo = self.github_connect(&spec, None, None)?;
+                if let Some(known) = recent_path_for_repo(&self.recents_path, &repo.slug()) {
+                    if known != self.project_root {
+                        let next = Shop::open_project_with_recents(&known, &self.recents_path)?
+                            .with_github(self.github.clone())
+                            .with_from(self.from.clone())
+                            .with_recents_path(self.recents_path.clone());
+                        *self = next;
+                        self.github_connect(&spec, None, None)?;
+                    }
+                }
+                Ok((
+                    format!(
+                        "connected repo {} (no clone, no invented lane)",
+                        repo.slug()
+                    ),
+                    None,
+                ))
+            }
+        }
     }
 }
 
@@ -880,6 +1479,7 @@ fn last_lines(s: &str, n: usize) -> String {
     lines[start..].join("\n")
 }
 
+#[allow(dead_code)]
 fn format_status(state: &ShopState, parent_id: Option<&str>) -> Result<String> {
     let mut out = String::new();
     let parents: Vec<&Parent> = if let Some(id) = parent_id {

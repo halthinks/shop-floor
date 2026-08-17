@@ -9,9 +9,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use serde_json::{json, Value};
 
 use crate::error::{Result, ShopError};
 use crate::github::GitHubRepo;
+use crate::hash::{format_rfc3339, unix_now};
 use crate::types::ShopState;
 use crate::workers::WorkerRoster;
 
@@ -160,11 +162,37 @@ impl Store {
     }
 
     pub fn append_event(&self, event: &impl Serialize) -> Result<()> {
+        let mut v = serde_json::to_value(event)?;
+        if let Some(obj) = v.as_object_mut() {
+            if !obj.contains_key("ts") {
+                let ts = unix_now();
+                obj.insert("ts".into(), json!(ts));
+                obj.insert("at".into(), json!(format_rfc3339(ts)));
+            }
+        }
         let path = self.root.join("events.jsonl");
         let mut f = OpenOptions::new().create(true).append(true).open(path)?;
-        serde_json::to_writer(&mut f, event)?;
+        serde_json::to_writer(&mut f, &v)?;
         f.write_all(b"\n")?;
         Ok(())
+    }
+
+    /// Lines as written. Unparseable lines are skipped — never invented.
+    pub fn load_events(&self) -> Vec<Value> {
+        let path = self.root.join("events.jsonl");
+        let Ok(text) = fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        text.lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                if line.is_empty() {
+                    None
+                } else {
+                    serde_json::from_str(line).ok()
+                }
+            })
+            .collect()
     }
 
     pub fn write_under(&self, rel: impl AsRef<Path>, bytes: &[u8]) -> Result<PathBuf> {
@@ -179,6 +207,31 @@ impl Store {
 
     pub fn outbox_dir(&self) -> PathBuf {
         self.root.join("outbox")
+    }
+
+    pub fn append_steer(&self, line: &impl Serialize) -> Result<()> {
+        let path = self.root.join("steer.jsonl");
+        let mut f = OpenOptions::new().create(true).append(true).open(path)?;
+        serde_json::to_writer(&mut f, line)?;
+        f.write_all(b"\n")?;
+        Ok(())
+    }
+
+    pub fn load_steer(&self) -> Vec<Value> {
+        let path = self.root.join("steer.jsonl");
+        let Ok(text) = fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        text.lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                if line.is_empty() {
+                    None
+                } else {
+                    serde_json::from_str(line).ok()
+                }
+            })
+            .collect()
     }
 }
 

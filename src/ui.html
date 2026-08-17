@@ -3,129 +3,439 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>shop — floor</title>
-  <style>
-    :root { color-scheme: dark; --bg:#141414; --card:#1e1e1e; --ink:#f2f2f2; --muted:#9a9a9a; --line:#333; --acc:#c4a35a; --danger:#c45a5a; }
-    body { margin:0; font:15px/1.45 system-ui,sans-serif; background:var(--bg); color:var(--ink); }
-    main { max-width:920px; margin:0 auto; padding:24px; }
-    h1 { font-size:1.4rem; font-weight:600; }
-    h2 { font-size:1.05rem; margin:1.4rem 0 .6rem; color:var(--acc); }
-    p, label, td, th { color:var(--ink); }
-    .muted { color:var(--muted); font-size:.92rem; }
-    section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:16px 18px; margin-bottom:16px; }
-    form { display:grid; gap:10px; }
-    .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-    input, select, button, textarea { font:inherit; padding:7px 9px; border-radius:5px; border:1px solid var(--line); background:#111; color:var(--ink); }
-    button { cursor:pointer; background:#2a2a2a; }
-    button.primary { background:var(--acc); color:#111; border-color:var(--acc); font-weight:600; }
-    button.danger { background:var(--danger); color:#111; border-color:var(--danger); font-weight:600; }
-    table { width:100%; border-collapse:collapse; }
-    th, td { text-align:left; padding:6px 4px; border-bottom:1px solid var(--line); vertical-align:top; }
-    .tag { font-size:.78rem; color:var(--muted); }
-  </style>
+  <title>shop</title>
+  <link rel="stylesheet" href="/ui.css">
 </head>
 <body>
-<main>
-  <h1>shop</h1>
-  <p class="muted">Hold-split-join sequencer. Add a worker and assign AI intelligence. Enrolling capacity does not create a job or a lane.</p>
+<div id="command-center">
+  <header id="topbar">
+    <div class="wordmark">shop</div>
+    <button type="button" id="project-switcher" aria-expanded="false">
+      <span id="project-name">project</span>
+    </button>
+    <div id="global-pills">
+      <span id="live-pill" class="action-pill wait">WAIT</span>
+    </div>
+    <div id="top-github">GitHub</div>
+    <div id="top-mailbox">mailbox</div>
+  </header>
 
-  <section>
-    <h2>Add worker</h2>
-    <form id="add-worker" method="post" action="/workers">
-      <div class="row">
-        <label>Name <input name="name" required placeholder="Alice"></label>
-        <label>Peer <input name="peer" required placeholder="alice"></label>
+  <div id="project-palette" hidden>
+    <div id="project-tabs">
+      <button type="button" id="tab-local" class="tab on">LOCAL</button>
+      <button type="button" id="tab-github" class="tab">GITHUB</button>
+    </div>
+    <div id="pane-local">
+      <form id="open-folder">
+        <label for="open-folder-path">Open folder</label>
+        <input id="open-folder-path" name="path" placeholder="/path/to/repo" autocomplete="off">
+      </form>
+      <div class="label">Recents</div>
+      <div id="recents"></div>
+    </div>
+    <div id="pane-github" hidden>
+      <div id="github-projects-wait"></div>
+      <form id="github-connect-picker">
+        <input name="owner" placeholder="owner">
+        <input name="name" placeholder="repo">
+        <input name="token" type="password" autocomplete="off" placeholder="token">
+        <button type="submit">Connect</button>
+      </form>
+      <div id="github-repo-list"></div>
+    </div>
+  </div>
+
+  <div id="stage">
+    <section id="workers">
+      <h2>WORKERS</h2>
+      <div id="worker-roster"></div>
+      <form id="add-worker">
+        <input name="name" required placeholder="peer">
+        <select id="intelligence-backend" name="backend">
+          <option value="cursor">cursor</option>
+          <option value="cursor-ultra">cursor-ultra</option>
+          <option value="grok-ultra">grok-ultra</option>
+          <option value="grok-bot">grok-bot</option>
+          <option value="grok-build">grok-build</option>
+        </select>
+        <input id="intelligence-model" name="model" placeholder="model">
+        <label class="skills-toggle"><input type="checkbox" name="github_skills" value="1" checked> skills</label>
+        <button type="submit">Add</button>
+      </form>
+      <div id="pill-legend" hidden>
+        <span class="action-pill idle">idle</span>
+        <span class="action-pill assigned">assigned</span>
+        <span class="action-pill working">working</span>
+        <span class="action-pill live">live</span>
+        <span class="action-pill wait">wait</span>
+        <span class="action-pill bounced">bounced</span>
       </div>
-      <div class="row">
-        <label>Intelligence backend
-          <select id="intelligence-backend" name="backend">
-            <option value="cursor">cursor</option>
-            <option value="cursor-ultra">cursor-ultra</option>
-            <option value="grok-bot">grok-bot</option>
-            <option value="grok-build">grok-build</option>
-          </select>
-        </label>
-        <label>Model id
-          <input id="intelligence-model" name="model" placeholder="Cursor Ultra / custom model id (optional for grok-*)">
-        </label>
-      </div>
-      <label><input type="checkbox" id="github-skills" name="github_skills" value="1" checked> GitHub skills pack (grant/revoke the whole pack)</label>
-      <button class="primary" type="submit">Add worker</button>
-    </form>
+    </section>
+
+    <section id="floor">
+      <h2>FLOOR</h2>
+      <div id="floor-body"></div>
+    </section>
+
+    <section id="github">
+      <h2>GITHUB</h2>
+      <div id="github-repo"></div>
+      <div id="github-auth"></div>
+      <form id="github-connect">
+        <input name="owner" placeholder="owner">
+        <input name="name" placeholder="repo">
+        <input name="branch" placeholder="main">
+        <input name="token" type="password" autocomplete="off" placeholder="token">
+        <button type="submit">Connect</button>
+      </form>
+      <div class="label">Issues</div>
+      <div id="github-issues"></div>
+      <div class="label">Pulls</div>
+      <div id="github-pulls"></div>
+      <div class="label">Checks</div>
+      <div id="github-checks"></div>
+      <form id="github-search">
+        <select name="kind">
+          <option value="code">code</option>
+          <option value="issues">issues</option>
+          <option value="pulls">pulls</option>
+        </select>
+        <input name="q" placeholder="search" autocomplete="off">
+      </form>
+      <div id="github-search-results"></div>
+      <form id="github-file">
+        <input name="path" placeholder="file path" autocomplete="off">
+      </form>
+      <div id="github-file-body"></div>
+      <div class="label">Reviews</div>
+      <div id="github-reviews"></div>
+      <form id="github-merge">
+        <input type="hidden" name="parent" id="merge-parent" value="">
+        <button type="submit" id="merge-btn" class="text-control" disabled>Merge</button>
+      </form>
+    </section>
+
+    <section id="control">
+      <h2>CONTROL</h2>
+      <div class="sub">SuperGrokHeavy</div>
+      <div id="steer-log"></div>
+      <form id="steer-form">
+        <input id="steer-input" name="text" autocomplete="off" placeholder="steer shop or SuperGrokHeavy">
+        <button type="submit">Send</button>
+      </form>
+    </section>
+  </div>
+
+  <section id="feed">
+    <h2>FEED</h2>
+    <a class="atom" href="/feed.xml">Atom</a>
+    <div id="feed-list"></div>
   </section>
 
-  <section>
-    <h2>Roster</h2>
-    <div id="roster">Loading…</div>
-  </section>
-
-  <section id="github-panel">
-    <h2>GitHub</h2>
-    <p class="muted">Connect owner/name. Token writes to <code>.shop/github.token</code> (gitignored). Merge is explicit only.</p>
-    <form id="github-connect" method="post" action="/github/connect">
-      <div class="row">
-        <label>Owner <input name="owner" required placeholder="halthinks"></label>
-        <label>Repo <input name="name" required placeholder="shop-floor"></label>
-      </div>
-      <div class="row">
-        <label>Default branch <input name="branch" placeholder="main"></label>
-        <label>Token (optional) <input name="token" type="password" autocomplete="off"></label>
-      </div>
-      <button class="primary" type="submit">Connect repo</button>
-    </form>
-    <div id="github-status" class="muted" style="margin-top:12px"></div>
-    <h2>Issues</h2>
-    <pre id="github-issues" class="muted">WAIT until connected + authenticated</pre>
-    <h2>Pull requests</h2>
-    <pre id="github-pulls" class="muted">WAIT until connected + authenticated</pre>
-    <h2>Checks</h2>
-    <pre id="github-checks" class="muted">WAIT until a real PR exists</pre>
-    <form id="github-merge" method="post" action="/github/merge" onsubmit="return confirm('Explicit merge. Never auto. Continue?');">
-      <label>PR number <input name="number" required></label>
-      <label>Type MERGE to confirm <input name="confirm" required placeholder="MERGE"></label>
-      <button class="danger" type="submit">Merge (danger)</button>
-    </form>
-  </section>
-</main>
+  <footer id="mailbox">
+    <h2>MAILBOX</h2>
+    <div id="mailbox-peers"></div>
+  </footer>
+</div>
 <script>
-async function j(url, opt){ const r = await fetch(url, opt); return r.json(); }
-async function refresh(){
-  const w = await j('/api/workers');
-  const el = document.getElementById('roster');
-  if (!w.workers || !w.workers.length) { el.innerHTML = '<p class="muted">No workers yet.</p>'; }
-  else {
-    el.innerHTML = '<table><thead><tr><th>Peer</th><th>Name</th><th>Intelligence</th><th>GitHub skills</th><th></th></tr></thead><tbody>' +
-      w.workers.map(x => `<tr>
-        <td>${x.peer}</td><td>${x.name}</td>
-        <td>${x.intelligence.backend} <span class="tag">${x.intelligence.model||'(no model id)'}</span>
-          <form method="post" action="/workers/${encodeURIComponent(x.peer)}/intelligence">
-            <select name="backend">
-              <option ${x.intelligence.backend==='cursor'?'selected':''}>cursor</option>
-              <option ${x.intelligence.backend==='cursor-ultra'?'selected':''}>cursor-ultra</option>
-              <option ${x.intelligence.backend==='grok-bot'?'selected':''}>grok-bot</option>
-              <option ${x.intelligence.backend==='grok-build'?'selected':''}>grok-build</option>
-            </select>
-            <input name="model" value="${x.intelligence.model||''}" placeholder="model id">
-            <button type="submit">Update intelligence</button>
-          </form>
-        </td>
-        <td>
-          <form method="post" action="/workers/${encodeURIComponent(x.peer)}/github-skills">
-            <input type="hidden" name="enabled" value="${x.github_skills ? '0' : '1'}">
-            <button type="submit">${x.github_skills ? 'Revoke pack' : 'Grant pack'}</button>
-          </form>
-        </td>
-      </tr>`).join('') + '</tbody></table>';
-  }
-  const g = await j('/api/github');
-  document.getElementById('github-status').textContent = g.connected
-    ? ('Connected ' + g.repo + ' auth=' + g.authenticated + (g.reason ? ' — ' + g.reason : ''))
-    : 'Not connected';
-  document.getElementById('github-issues').textContent = JSON.stringify(g.issues, null, 2);
-  document.getElementById('github-pulls').textContent = JSON.stringify(g.pulls, null, 2);
-  document.getElementById('github-checks').textContent = JSON.stringify(g.checks, null, 2);
+const BACKENDS = ['cursor','cursor-ultra','grok-ultra','grok-bot','grok-build'];
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function asList(v){
+  if (v == null) return null;
+  if (Array.isArray(v)) return v;
+  if (v.items && Array.isArray(v.items)) return v.items;
+  if (v.check_runs && Array.isArray(v.check_runs)) return v.check_runs;
+  if (typeof v === 'string') return null;
+  if (v.WAIT || v.error) return null;
+  return null;
 }
-refresh().catch(e => { document.getElementById('roster').textContent = String(e); });
+function waitOf(v){
+  if (v == null) return 'WAIT';
+  if (typeof v === 'string' && /^WAIT/i.test(v)) return v;
+  if (v.WAIT) return String(v.WAIT);
+  if (v.error) return String(v.error);
+  return null;
+}
+function countLabel(n){ return (n==null) ? 'WAIT' : String(n); }
+async function j(url, opt){
+  const r = await fetch(url, opt);
+  const t = await r.text();
+  try { return JSON.parse(t); } catch { return { error: t }; }
+}
+function pillClass(action){
+  const a = String(action||'wait').toLowerCase();
+  if (['idle','assigned','working','live','wait','bounced'].includes(a)) return a;
+  return 'wait';
+}
+function renderList(el, data, line){
+  const w = waitOf(data);
+  const arr = asList(data);
+  if (arr) {
+    if (!arr.length) { el.innerHTML = '<div class="quiet">none</div>'; return; }
+    el.innerHTML = arr.slice(0, 24).map(line).join('');
+    return;
+  }
+  el.innerHTML = '<div class="wait">' + esc(w || 'WAIT') + '</div>';
+}
+function timeOf(ev){
+  const at = ev && ev.at ? String(ev.at) : '';
+  return at.length >= 19 ? at.slice(11,19) : at;
+}
+
+let selectedPull = null;
+
+async function refresh(){
+  let st;
+  try { st = await j('/api/status'); }
+  catch { st = { store_ok:false, waits:['WAIT: store unreadable'] }; }
+
+  const storeOk = st.store_ok !== false;
+  const mailOk = !!(st.mailbox && st.mailbox.present && !st.mailbox.wait);
+  const pill = document.getElementById('live-pill');
+  const gp = document.getElementById('global-pills');
+  if (storeOk && mailOk) {
+    pill.textContent = 'LIVE';
+    pill.className = 'action-pill live';
+  } else {
+    const miss = (st.waits && st.waits[0]) || (st.mailbox && st.mailbox.wait) || 'WAIT store';
+    pill.textContent = String(miss).replace(/^WAIT:\s*/,'WAIT ');
+    pill.className = 'action-pill wait';
+  }
+  let extra = '';
+  if (st.github && st.github.wait) extra += '<span class="action-pill wait">'+esc(st.github.wait.replace(/^WAIT:\\s*/, 'WAIT '))+'</span>';
+  gp.innerHTML = pill.outerHTML + extra;
+
+  const proj = st.project || {};
+  document.getElementById('project-name').textContent = proj.name || proj.path || 'project';
+  document.getElementById('top-github').textContent = (st.github && st.github.repo) ? st.github.repo : 'GitHub';
+  const mb = st.mailbox && st.mailbox.root ? st.mailbox.root.split(/[\\\\/]/).slice(-2).join('/') : 'mailbox';
+  document.getElementById('top-mailbox').textContent = mb;
+
+  const roster = document.getElementById('worker-roster');
+  const workers = st.workers || [];
+  roster.innerHTML = workers.map(w => {
+    const action = pillClass(w.action);
+    const intel = w.intelligence || {};
+    const skills = w.github_skills !== false;
+    return `<div class="worker-line">
+      <span class="peer">${esc(w.peer)}</span>
+      <form class="intel" action="/workers/${encodeURIComponent(w.peer)}/intelligence" method="post">
+        <select name="backend">${BACKENDS.map(b => `<option value="${b}" ${intel.backend===b?'selected':''}>${b}</option>`).join('')}</select>
+        <input name="model" value="${esc(intel.model||'')}" placeholder="model">
+      </form>
+      <form class="skills" action="/workers/${encodeURIComponent(w.peer)}/github-skills" method="post">
+        <label><input type="checkbox" name="enabled" value="1" ${skills?'checked':''}> gh</label>
+      </form>
+      <span class="action-pill ${action}${action==='working'||action==='live'?' breathe':''}">${esc(action)}</span>
+    </div>`;
+  }).join('');
+
+  const floor = document.getElementById('floor-body');
+  const parents = st.parents || [];
+  if (!parents.length) floor.innerHTML = '<div class="floor-headline">No parent open</div>';
+  else floor.innerHTML = parents.map(p => {
+    const kids = (p.children||[]).map(c =>
+      `<div class="child-line"><span>${esc(c.id)}</span><span>${esc(c.state)}</span><span>${esc(c.peer)}</span></div>`
+    ).join('');
+    const claims = (st.claims||[]).filter(x => x.parent_id===p.id);
+    const chips = claims.flatMap(x => x.paths||[]).map(path => `<span class="chip">${esc(path)}</span>`).join('');
+    return `<div class="floor-headline">${esc(p.id)} <span class="floor-state">${esc(p.state)}</span></div>${kids}${chips?`<div class="chips">${chips}</div>`:''}`;
+  }).join('');
+
+  const verified = parents.find(p => p.state === 'VERIFIED');
+  document.getElementById('merge-parent').value = verified ? verified.id : '';
+  document.getElementById('merge-btn').disabled = !verified;
+
+  const box = document.getElementById('mailbox-peers');
+  if (st.mailbox && st.mailbox.wait) box.innerHTML = `<span class="wait">${esc(st.mailbox.wait)}</span>`;
+  else if (st.mailbox && st.mailbox.peers && st.mailbox.peers.length) {
+    box.innerHTML = st.mailbox.peers.map(p => `<span>${esc(p.peer)} <b>${p.unread}</b></span>`).join('');
+  } else box.innerHTML = '<span>unread 0</span>';
+
+  const feed = document.getElementById('feed-list');
+  const events = st.events || [];
+  feed.innerHTML = events.map(e =>
+    `<div class="feed-line"><time>${esc(timeOf(e))}</time><span>${esc(e.title || e.op || 'event')}</span><span class="det">${esc([e.peer,e.parent,e.child,e.repo].filter(Boolean).join('  '))}</span></div>`
+  ).join('');
+
+  refreshGithub();
+  refreshSteer();
+  refreshProject();
+}
+
+async function refreshGithub(){
+  const g = await j(selectedPull ? '/api/github?pull='+encodeURIComponent(selectedPull) : '/api/github');
+  document.getElementById('github-repo').textContent = g.repo || 'not connected';
+  document.getElementById('github-auth').innerHTML = g.wait
+    ? `<div class="wait">${esc(g.wait)}</div>`
+    : (g.authenticated ? '<div class="quiet">authenticated</div>' : '<div class="wait">WAIT: no auth</div>');
+  renderList(document.getElementById('github-issues'), g.issues, it =>
+    `<div class="gh-line"><span class="num">${esc(it.number||'')}</span><span>${esc(it.title||it.name||JSON.stringify(it).slice(0,80))}</span></div>`);
+  renderList(document.getElementById('github-pulls'), g.pulls, it =>
+    `<div class="gh-line pull" data-n="${esc(it.number||'')}">#${esc(it.number||'')} ${esc(it.title||'')}</div>`);
+  renderList(document.getElementById('github-checks'), g.checks, it =>
+    `<div class="gh-line">${esc(it.name||it.context||'check')} ${esc(it.conclusion||it.state||it.status||'')}</div>`);
+  const rev = document.getElementById('github-reviews');
+  const reviews = asList(g.reviews) || [];
+  const comments = asList(g.comments) || [];
+  if (!reviews.length && !comments.length) {
+    rev.innerHTML = '<div class="quiet">' + esc(waitOf(g.reviews) || 'none') + '</div>';
+  } else {
+    rev.innerHTML = reviews.map(r => `<div class="gh-line">${esc(r.user && r.user.login || r.state || 'review')} ${esc(r.state||'')}</div>`).join('')
+      + comments.map(c => `<div class="gh-line">${esc(c.user && c.user.login || '')} ${esc((c.body||'').slice(0,120))}</div>`).join('');
+  }
+  if (g.merge_parent) document.getElementById('merge-parent').value = g.merge_parent;
+  document.getElementById('merge-btn').disabled = !g.merge_enabled;
+}
+
+async function refreshSteer(){
+  const s = await j('/api/steer');
+  const lines = s.lines || [];
+  document.getElementById('steer-log').innerHTML = lines.map(l =>
+    `<div class="steer-line ${esc(l.role||'')}"><span class="who">${esc(l.role==='user'?'you': l.role==='shop'?'shop':'SuperGrokHeavy')}</span><span>${esc(l.text||'')}</span>${l.wait?`<span class="wait">${esc(l.wait)}</span>`:''}</div>`
+  ).join('');
+  const log = document.getElementById('steer-log');
+  log.scrollTop = log.scrollHeight;
+}
+
+async function refreshProject(){
+  const p = await j('/api/projects');
+  const rec = document.getElementById('recents');
+  const items = p.local_recents || [];
+  rec.innerHTML = items.length
+    ? items.map(r => `<button type="button" class="recent" data-path="${esc(r.path)}">${esc(r.name||r.path)} <span class="quiet">${esc(r.path)}</span></button>`).join('')
+    : '<div class="quiet">none</div>';
+  const waitEl = document.getElementById('github-projects-wait');
+  const gl = document.getElementById('github-repo-list');
+  if (typeof p.github === 'string') {
+    waitEl.innerHTML = '<div class="wait">'+esc(p.github)+'</div>';
+    gl.innerHTML = '';
+    return;
+  }
+  waitEl.innerHTML = '';
+  const repos = Array.isArray(p.github) ? p.github : [];
+  gl.innerHTML = repos.length
+    ? repos.map(s => `<button type="button" class="recent" data-repo="${esc(s)}">${esc(s)}</button>`).join('')
+    : '<div class="quiet">none</div>';
+}
+
+document.getElementById('add-worker').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const name = String(fd.get('name')||'').trim();
+  await j('/api/workers', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ name, peer: name, backend: fd.get('backend'), model: fd.get('model')||'', github_skills: fd.get('github_skills') ? '1' : '0' }) });
+  e.target.reset();
+  refresh();
+});
+document.getElementById('worker-roster').addEventListener('change', async (e) => {
+  const form = e.target.closest('form');
+  if (!form) return;
+  const fd = new FormData(form);
+  if (form.classList.contains('skills')) {
+    await fetch(form.action, { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ enabled: fd.get('enabled') ? '1' : '0' }) });
+  } else {
+    await fetch(form.action, { method:'POST', body: new URLSearchParams(fd) });
+  }
+  refresh();
+});
+document.getElementById('github-connect').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  await j('/api/github/connect', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ owner: fd.get('owner'), name: fd.get('name'), branch: fd.get('branch'), token: fd.get('token') }) });
+  refresh();
+});
+document.getElementById('github-merge').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (document.getElementById('merge-btn').disabled) return;
+  await j('/api/github/merge', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ parent: document.getElementById('merge-parent').value }) });
+  refresh();
+});
+document.getElementById('github-search').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const data = await j('/api/github/search?kind='+encodeURIComponent(fd.get('kind'))+'&q='+encodeURIComponent(fd.get('q')));
+  renderList(document.getElementById('github-search-results'), data, it =>
+    `<div class="gh-line">${esc(it.name||it.path||it.title||it.html_url||'')}</div>`);
+});
+document.getElementById('github-file').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const data = await j('/api/github/file?path='+encodeURIComponent(fd.get('path')));
+  const el = document.getElementById('github-file-body');
+  if (data.WAIT) { el.innerHTML = '<div class="wait">'+esc(data.WAIT)+'</div>'; return; }
+  const name = data.name || data.path || fd.get('path');
+  const content = data.content ? atob(data.content.replace(/\\n/g,'')) : (data.ok ? 'ok' : '');
+  const arr = asList(data);
+  if (arr) { renderList(el, data, it => `<div class="gh-line">${esc(it.name||it.path||'')}</div>`); return; }
+  el.innerHTML = `<div class="gh-line">${esc(name)}</div><div class="file-peek">${esc((content||'').slice(0,2000))}</div>`;
+});
+document.getElementById('github-pulls').addEventListener('click', (e) => {
+  const row = e.target.closest('.pull');
+  if (!row) return;
+  selectedPull = row.getAttribute('data-n');
+  refreshGithub();
+});
+document.getElementById('steer-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const input = document.getElementById('steer-input');
+  const text = input.value.trim();
+  if (!text) return;
+  await j('/api/steer', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text }) });
+  input.value = '';
+  refreshSteer();
+  refresh();
+});
+document.getElementById('project-switcher').addEventListener('click', () => {
+  const pal = document.getElementById('project-palette');
+  pal.hidden = !pal.hidden;
+  document.getElementById('project-switcher').setAttribute('aria-expanded', pal.hidden ? 'false' : 'true');
+});
+document.getElementById('tab-local').addEventListener('click', () => {
+  document.getElementById('tab-local').classList.add('on');
+  document.getElementById('tab-github').classList.remove('on');
+  document.getElementById('pane-local').hidden = false;
+  document.getElementById('pane-github').hidden = true;
+});
+document.getElementById('tab-github').addEventListener('click', () => {
+  document.getElementById('tab-github').classList.add('on');
+  document.getElementById('tab-local').classList.remove('on');
+  document.getElementById('pane-local').hidden = true;
+  document.getElementById('pane-github').hidden = false;
+});
+document.getElementById('open-folder').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const path = new FormData(e.target).get('path');
+  await j('/api/project/open', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ kind: 'local', path }) });
+  document.getElementById('project-palette').hidden = true;
+  refresh();
+});
+document.getElementById('recents').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-path]');
+  if (!b) return;
+  await j('/api/project/open', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ kind: 'local', path: b.getAttribute('data-path') }) });
+  document.getElementById('project-palette').hidden = true;
+  refresh();
+});
+document.getElementById('github-repo-list').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-repo]');
+  if (!b) return;
+  await j('/api/project/open', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ kind: 'github', repo: b.getAttribute('data-repo') }) });
+  document.getElementById('project-palette').hidden = true;
+  refresh();
+});
+document.getElementById('github-connect-picker').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  await j('/api/github/connect', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ owner: fd.get('owner'), name: fd.get('name'), token: fd.get('token') }) });
+  refreshProject();
+});
+refresh();
+setInterval(refresh, 2000);
 </script>
 </body>
 </html>
