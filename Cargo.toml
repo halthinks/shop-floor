@@ -1,0 +1,18 @@
+[package]
+name = "shop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+license = "Apache-2.0"
+description = "Thin shop-floor hold-split-join sequencer"
+repository = "https://github.com/halthinks/shop-floor"
+readme = "README.md"
+keywords = ["shop-floor", "sequencer", "hold-split-join"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "=4.5.40", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
