@@ -5,6 +5,7 @@
 //! live pid. `working` requires an observed Working pid. GitHub counts stay
 //! `Option` — None is WAIT, never a fake zero.
 
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -100,7 +101,7 @@ pub struct ProjectView {
     pub store: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Awareness {
     pub store_ok: bool,
     pub project: ProjectView,
@@ -111,7 +112,8 @@ pub struct Awareness {
     pub github: GitHubAwareness,
     /// Newest first. Only events that were written to `.shop/events.jsonl`.
     pub events: Vec<Value>,
-    /// Exact missing pieces. Empty only when nothing is WAIT.
+    /// Recorded gaps from the store snapshot. Serialize merges GitHub-count
+    /// and assigned-job-pid waits so the truth panel never invents a zero.
     pub waits: Vec<String>,
 }
 
@@ -233,6 +235,54 @@ impl Awareness {
     pub fn merge_waits(&self, processes: &[LiveProcess]) -> Vec<String> {
         merge_truth_waits(&self.waits, &self.github, &self.jobs(processes))
     }
+
+    /// Live jobs from store parents. A worker pid attaches only when that
+    /// worker is already bound to the exact parent/child/peer. Never steal.
+    pub fn jobs_from_workers(&self) -> Vec<JobView> {
+        let mut jobs = Vec::new();
+        for parent in &self.parents {
+            if matches!(parent.state, ParentState::Closed) {
+                continue;
+            }
+            for child in &parent.children {
+                let tracked = self.workers.iter().find(|w| {
+                    w.peer == child.peer
+                        && w.job_parent_id.as_deref() == Some(parent.id.as_str())
+                        && w.job_child_id.as_deref() == Some(child.id.as_str())
+                        && w.pid.is_some()
+                });
+                let proc = tracked.and_then(live_process_from_bound_worker);
+                let processes = proc.as_ref().map(std::slice::from_ref).unwrap_or(&[]);
+                jobs.push(JobView::from_child(parent, child, processes));
+            }
+        }
+        jobs
+    }
+
+    /// Recorded waits plus GitHub-count and assigned-job-pid gaps from
+    /// store + bound worker pids. Missing count stays WAIT, never 0.
+    pub fn truth_waits(&self) -> Vec<String> {
+        merge_truth_waits(&self.waits, &self.github, &self.jobs_from_workers())
+    }
+}
+
+impl Serialize for Awareness {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let jobs = self.jobs_from_workers();
+        let waits = merge_truth_waits(&self.waits, &self.github, &jobs);
+        let mut s = serializer.serialize_struct("Awareness", 10)?;
+        s.serialize_field("store_ok", &self.store_ok)?;
+        s.serialize_field("project", &self.project)?;
+        s.serialize_field("workers", &self.workers)?;
+        s.serialize_field("claims", &self.claims)?;
+        s.serialize_field("parents", &self.parents)?;
+        s.serialize_field("jobs", &jobs)?;
+        s.serialize_field("mailbox", &self.mailbox)?;
+        s.serialize_field("github", &self.github)?;
+        s.serialize_field("events", &self.events)?;
+        s.serialize_field("waits", &waits)?;
+        s.end()
+    }
 }
 
 /// Observed live-job count. Length of the observed vec, never a guess.
@@ -298,6 +348,21 @@ pub fn format_observed_count(count: Option<u64>) -> String {
 /// Live jobs on open parents. Count is the observed vec length, not a guess.
 pub fn live_jobs(parents: &[ParentView], processes: &[LiveProcess]) -> Vec<JobView> {
     JobView::from_parents(parents, processes)
+}
+
+/// Reconstruct a ledger row only when the worker already named this job.
+/// Parent-less pids are refused so they cannot fall through onto another child.
+fn live_process_from_bound_worker(w: &WorkerView) -> Option<LiveProcess> {
+    let pid = w.pid?;
+    let liveness = w.pid_liveness?;
+    let parent_id = w.job_parent_id.as_deref()?;
+    let child_id = w.job_child_id.as_deref()?;
+    let mut proc = LiveProcess::observed(
+        pid,
+        crate::procwait::ProcessBind::new(Some(parent_id), Some(child_id), Some(w.peer.as_str())),
+    );
+    proc.liveness = liveness;
+    Some(proc)
 }
 
 fn latest_process_for_peer<'a>(peer: &str, processes: &'a [LiveProcess]) -> Option<&'a LiveProcess> {
@@ -836,5 +901,128 @@ mod tests {
         assert_eq!(view.job_child_id.as_deref(), Some("c2"));
         assert_eq!(view.pid, None);
         assert_eq!(view.action, "assigned");
+    }
+
+    fn panel(parents: Vec<ParentView>, workers: Vec<WorkerView>, github: GitHubAwareness) -> Awareness {
+        Awareness {
+            store_ok: true,
+            project: ProjectView {
+                name: "shop".into(),
+                path: ".".into(),
+                store: ".shop".into(),
+            },
+            workers,
+            claims: Vec::new(),
+            parents,
+            mailbox: empty_mail(),
+            github,
+            events: Vec::new(),
+            waits: Vec::new(),
+        }
+    }
+
+    fn unobserved_github() -> GitHubAwareness {
+        GitHubAwareness {
+            repo: None,
+            default_branch: None,
+            authenticated: false,
+            token_present: false,
+            wait: Some("WAIT: GitHub repo not connected".into()),
+            checks: Value::Null,
+            issue_count: None,
+            pr_count: None,
+            check_count: None,
+        }
+    }
+
+    #[test]
+    fn truth_panel_json_includes_jobs_and_does_not_invent_zero() {
+        let parents = vec![parent_with_child(ChildState::Assigned)];
+        let workers = vec![WorkerView::from_worker(
+            worker("alice"),
+            &parents,
+            &empty_mail(),
+            &[],
+        )];
+        let awareness = panel(parents, workers, unobserved_github());
+        let json = serde_json::to_value(&awareness).unwrap();
+        assert!(json.get("jobs").and_then(|j| j.as_array()).is_some());
+        assert_eq!(json["jobs"].as_array().unwrap().len(), 1);
+        assert_eq!(json["jobs"][0]["pid"], Value::Null);
+        assert_eq!(json["jobs"][0]["action"], "assigned");
+        assert_ne!(json["jobs"][0]["action"], "working");
+        assert_eq!(json["github"]["issue_count"], Value::Null);
+        assert_eq!(json["github"]["pr_count"], Value::Null);
+        assert_eq!(json["github"]["check_count"], Value::Null);
+        assert_ne!(json["github"]["issue_count"], 0);
+        assert_ne!(json["github"]["issue_count"], "0");
+        let waits = json["waits"].as_array().expect("waits");
+        assert!(waits.iter().any(|w| w.as_str().unwrap().contains("issue_count")));
+        assert!(waits.iter().any(|w| w.as_str().unwrap().contains("P/c1")));
+        assert!(waits.iter().all(|w| w.as_str().unwrap().contains("WAIT")));
+        assert_eq!(format_observed_count(None), "WAIT");
+        assert_ne!(format_observed_count(None), "0");
+        assert_eq!(observed_working_jobs(&awareness.jobs_from_workers()), 0);
+        assert_eq!(observed_job_count(&awareness.jobs_from_workers()), 1);
+    }
+
+    #[test]
+    fn jobs_from_workers_binds_only_the_exact_open_job() {
+        let parents = vec![parent_with_child(ChildState::Assigned)];
+        let processes = vec![proc("alice", PidLiveness::Working, 2)];
+        let workers = vec![WorkerView::from_worker(
+            worker("alice"),
+            &parents,
+            &empty_mail(),
+            &processes,
+        )];
+        let awareness = panel(parents, workers, unobserved_github());
+        let jobs = awareness.jobs_from_workers();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].pid, Some(42));
+        assert_eq!(jobs[0].pid_liveness, Some(PidLiveness::Working));
+        assert_eq!(jobs[0].action, "working");
+        assert_eq!(observed_working_jobs(&jobs), 1);
+        assert_eq!(awareness.working_worker_count(), 1);
+    }
+
+    #[test]
+    fn jobs_from_workers_does_not_steal_another_parent_pid() {
+        let parents = vec![parent_with_child(ChildState::Assigned)];
+        let mut other = WorkerView::from_worker(worker("alice"), &parents, &empty_mail(), &[]);
+        other.pid = Some(99);
+        other.pid_liveness = Some(PidLiveness::Working);
+        other.job_parent_id = Some("Q".into());
+        other.job_child_id = Some("c1".into());
+        other.action = "working".into();
+        let awareness = panel(parents, vec![other], unobserved_github());
+        let jobs = awareness.jobs_from_workers();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].pid, None);
+        assert_eq!(jobs[0].action, "assigned");
+        assert_ne!(jobs[0].action, "working");
+        assert_eq!(observed_working_jobs(&jobs), 0);
+        let waits = awareness.truth_waits();
+        assert!(waits.iter().any(|w| w.contains("P/c1")));
+    }
+
+    #[test]
+    fn closed_parent_is_absent_from_truth_panel_jobs() {
+        let mut parent = parent_with_child(ChildState::Assigned);
+        parent.state = ParentState::Closed;
+        let processes = vec![proc("alice", PidLiveness::Working, 2)];
+        let workers = vec![WorkerView::from_worker(
+            worker("alice"),
+            &[parent.clone()],
+            &empty_mail(),
+            &processes,
+        )];
+        let awareness = panel(vec![parent], workers, unobserved_github());
+        assert!(awareness.jobs_from_workers().is_empty());
+        let json = serde_json::to_value(&awareness).unwrap();
+        assert_eq!(json["jobs"].as_array().unwrap().len(), 0);
+        assert_eq!(json["workers"][0]["job_parent_id"], Value::Null);
+        assert_eq!(json["workers"][0]["action"], "working");
+        assert_eq!(awareness.working_worker_count(), 1);
     }
 }
