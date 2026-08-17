@@ -14,6 +14,13 @@ use crate::procwait::{LiveProcess, PidLiveness};
 use crate::types::{ChildState, Claim, EvidenceStatus, ParentState};
 use crate::workers::{Intelligence, Worker};
 
+/// This file is a truth panel, not a second AASM kernel.
+pub const COPIES_KERNEL: bool = false;
+
+/// A mailbox handoff is Evidence. It is not a live pid and cannot mint working.
+pub const HANDOFF_IS_NOT_A_PID: &str =
+    "mailbox handoff is Evidence; not a live pid; cannot mint working, PASS, or VERIFIED";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChildView {
     pub id: String,
@@ -46,9 +53,12 @@ pub struct GitHubAwareness {
     pub token_present: bool,
     pub wait: Option<String>,
     pub checks: Value,
-    /// None means WAIT — never invent a zero.
+    /// None means WAIT — never invent a zero. Missing JSON field stays None.
+    #[serde(default)]
     pub issue_count: Option<u64>,
+    #[serde(default)]
     pub pr_count: Option<u64>,
+    #[serde(default)]
     pub check_count: Option<u64>,
 }
 
@@ -183,7 +193,29 @@ impl JobView {
     }
 }
 
+impl Default for GitHubAwareness {
+    /// Unobserved GitHub. Counts stay None / WAIT. Never invent 0.
+    fn default() -> Self {
+        Self::unobserved()
+    }
+}
+
 impl GitHubAwareness {
+    /// All counts None / WAIT. Missing evidence is not a fake zero.
+    pub fn unobserved() -> Self {
+        Self {
+            repo: None,
+            default_branch: None,
+            authenticated: false,
+            token_present: false,
+            wait: Some("WAIT: GitHub not observed".into()),
+            checks: Value::Null,
+            issue_count: None,
+            pr_count: None,
+            check_count: None,
+        }
+    }
+
     /// Observed count text. None is WAIT, never the digit 0.
     pub fn format_count(count: Option<u64>) -> String {
         format_observed_count(count)
@@ -233,7 +265,12 @@ impl Awareness {
     /// Store waits plus exact GitHub-count and assigned-job-pid gaps.
     /// Does not invent zeros. Does not drop an already-recorded WAIT.
     pub fn merge_waits(&self, processes: &[LiveProcess]) -> Vec<String> {
-        merge_truth_waits(&self.waits, &self.github, &self.jobs(processes))
+        merge_truth_waits(
+            &self.waits,
+            &self.github,
+            &self.jobs(processes),
+            &self.parents,
+        )
     }
 
     /// Live jobs from store parents. A worker pid attaches only when that
@@ -262,14 +299,19 @@ impl Awareness {
     /// Recorded waits plus GitHub-count and assigned-job-pid gaps from
     /// store + bound worker pids. Missing count stays WAIT, never 0.
     pub fn truth_waits(&self) -> Vec<String> {
-        merge_truth_waits(&self.waits, &self.github, &self.jobs_from_workers())
+        merge_truth_waits(
+            &self.waits,
+            &self.github,
+            &self.jobs_from_workers(),
+            &self.parents,
+        )
     }
 }
 
 impl Serialize for Awareness {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let jobs = self.jobs_from_workers();
-        let waits = merge_truth_waits(&self.waits, &self.github, &jobs);
+        let waits = merge_truth_waits(&self.waits, &self.github, &jobs, &self.parents);
         let mut s = serializer.serialize_struct("Awareness", 10)?;
         s.serialize_field("store_ok", &self.store_ok)?;
         s.serialize_field("project", &self.project)?;
@@ -305,17 +347,20 @@ pub fn observed_working_jobs(jobs: &[JobView]) -> usize {
         .count()
 }
 
-/// Recorded waits plus GitHub-count and assigned-job-pid gaps. Never invents 0.
+/// Recorded waits plus GitHub-count, assigned-job-pid, and parent-evidence gaps.
+/// Never invents 0. Never mints PASS or VERIFIED from missing evidence.
 pub fn merge_truth_waits(
     recorded: &[String],
     github: &GitHubAwareness,
     jobs: &[JobView],
+    parents: &[ParentView],
 ) -> Vec<String> {
     let mut waits = recorded.to_vec();
     for wait in github
         .count_waits()
         .into_iter()
         .chain(job_pid_waits(jobs))
+        .chain(parent_evidence_waits(parents))
     {
         if !waits.iter().any(|existing| existing == &wait) {
             waits.push(wait);
@@ -343,6 +388,70 @@ pub fn format_observed_count(count: Option<u64>) -> String {
         Some(n) => n.to_string(),
         None => "WAIT".into(),
     }
+}
+
+/// `None` is WAIT. A recorded `Some(Pass)` is passed through, not minted here.
+pub fn recorded_or_wait(status: Option<EvidenceStatus>) -> EvidenceStatus {
+    status.unwrap_or(EvidenceStatus::Wait)
+}
+
+/// Parent verify word. Missing evidence is WAIT, never PASS or VERIFIED.
+pub fn parent_verify_or_wait(parent: &ParentView) -> EvidenceStatus {
+    recorded_or_wait(parent.verify)
+}
+
+/// Observed GitHub list/count payload. Missing, WAIT, error, or non-list is None.
+/// Never invent 0. An observed empty array or `total_count: 0` is Some(0).
+pub fn observed_github_count(value: &Value) -> Option<u64> {
+    if value.is_null() {
+        return None;
+    }
+    if value.as_str().is_some() {
+        return None;
+    }
+    if value.get("WAIT").is_some() || value.get("error").is_some() {
+        return None;
+    }
+    if let Some(n) = value
+        .get("total_count")
+        .and_then(|x| x.as_u64())
+        .or_else(|| value.get("total").and_then(|x| x.as_u64()))
+    {
+        return Some(n);
+    }
+    value.as_array().map(|a| a.len() as u64)
+}
+
+/// Incomplete parent evidence is WAIT. Merge ACK / missing verify cannot mint PASS.
+pub fn parent_evidence_waits(parents: &[ParentView]) -> Vec<String> {
+    let mut waits = Vec::new();
+    for p in parents {
+        if matches!(p.state, ParentState::Closed) {
+            continue;
+        }
+        if p.verify == Some(EvidenceStatus::Wait) {
+            waits.push(format!("WAIT: verify {} not PASS", p.id));
+        }
+        if p.github_pr_url.is_some() && p.github_pr_status.is_none() {
+            waits.push(format!(
+                "WAIT: GitHub PR status {} not observed; not invented as PASS",
+                p.id
+            ));
+        }
+        if p.github_merged && p.github_merge_status.is_none() {
+            waits.push(format!(
+                "WAIT: GitHub merge status {} not observed; not invented as PASS",
+                p.id
+            ));
+        }
+        if p.github_merged && p.verify != Some(EvidenceStatus::Pass) {
+            waits.push(format!(
+                "WAIT: merge ACK on {} is Evidence; not VERIFIED",
+                p.id
+            ));
+        }
+    }
+    waits
 }
 
 /// Live jobs on open parents. Count is the observed vec length, not a guess.
@@ -490,7 +599,10 @@ fn classify_job(child: &ChildView, tracked: Option<&LiveProcess>) -> (String, Op
                     )),
                 )
             } else {
-                ("assigned".into(), Some("child ASSIGNED".into()))
+                (
+                    "assigned".into(),
+                    Some("child ASSIGNED; no observed pid; WAIT".into()),
+                )
             }
         }
         ChildState::Joined => {
@@ -544,7 +656,12 @@ pub fn classify_action(
         );
     }
     if has_assigned {
-        return ("assigned".into(), Some("child ASSIGNED".into()), unread);
+        let reason = if latest_pid.is_none() {
+            "child ASSIGNED; no observed pid; WAIT"
+        } else {
+            "child ASSIGNED"
+        };
+        return ("assigned".into(), Some(reason.into()), unread);
     }
     if let Some(proc) = latest_pid {
         return (
@@ -656,12 +773,20 @@ mod tests {
         let (action, reason, _) = classify_action("alice", &parents, &empty_mail(), &[]);
         assert_eq!(action, "assigned");
         assert_ne!(action, "working");
-        assert!(reason.unwrap().contains("ASSIGNED"));
+        let reason = reason.unwrap();
+        assert!(reason.contains("ASSIGNED"));
+        assert!(reason.contains("WAIT"));
         let jobs = live_jobs(&parents, &[]);
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].pid, None);
         assert_eq!(jobs[0].action, "assigned");
         assert_ne!(jobs[0].action, "working");
+        assert!(jobs[0].action_reason.as_ref().unwrap().contains("WAIT"));
+        let waits = job_pid_waits(&jobs);
+        assert_eq!(waits.len(), 1);
+        assert!(waits[0].contains("WAIT"));
+        assert!(waits[0].contains("P/c1"));
+        assert_eq!(observed_working_jobs(&jobs), 0);
     }
 
     #[test]
@@ -922,17 +1047,9 @@ mod tests {
     }
 
     fn unobserved_github() -> GitHubAwareness {
-        GitHubAwareness {
-            repo: None,
-            default_branch: None,
-            authenticated: false,
-            token_present: false,
-            wait: Some("WAIT: GitHub repo not connected".into()),
-            checks: Value::Null,
-            issue_count: None,
-            pr_count: None,
-            check_count: None,
-        }
+        let mut g = GitHubAwareness::unobserved();
+        g.wait = Some("WAIT: GitHub repo not connected".into());
+        g
     }
 
     #[test]
@@ -1024,5 +1141,182 @@ mod tests {
         assert_eq!(json["workers"][0]["job_parent_id"], Value::Null);
         assert_eq!(json["workers"][0]["action"], "working");
         assert_eq!(awareness.working_worker_count(), 1);
+    }
+
+    #[test]
+    fn missing_github_counts_deserialize_as_none_not_zero() {
+        assert!(!COPIES_KERNEL);
+        assert!(HANDOFF_IS_NOT_A_PID.contains("Evidence"));
+        assert!(HANDOFF_IS_NOT_A_PID.contains("not a live pid"));
+        let omitted: GitHubAwareness = serde_json::from_value(serde_json::json!({
+            "repo": null,
+            "default_branch": null,
+            "authenticated": false,
+            "token_present": false,
+            "wait": null,
+            "checks": null
+        }))
+        .expect("omitted counts are None / WAIT, not a missing-field error");
+        assert_eq!(omitted.issue_count, None);
+        assert_eq!(omitted.pr_count, None);
+        assert_eq!(omitted.check_count, None);
+        assert_ne!(omitted.issue_count, Some(0));
+        assert_eq!(format_observed_count(omitted.issue_count), "WAIT");
+        assert_ne!(format_observed_count(omitted.issue_count), "0");
+        assert_eq!(omitted.count_waits().len(), 3);
+
+        let explicit_null: GitHubAwareness = serde_json::from_value(serde_json::json!({
+            "repo": null,
+            "default_branch": null,
+            "authenticated": false,
+            "token_present": false,
+            "wait": null,
+            "checks": null,
+            "issue_count": null,
+            "pr_count": null,
+            "check_count": null
+        }))
+        .unwrap();
+        assert_eq!(explicit_null.issue_count, None);
+        assert_eq!(format_observed_count(explicit_null.pr_count), "WAIT");
+
+        let defaulted = GitHubAwareness::default();
+        assert_eq!(defaulted.issue_count, None);
+        assert_eq!(defaulted.pr_count, None);
+        assert_eq!(defaulted.check_count, None);
+        assert_eq!(GitHubAwareness::format_count(None), "WAIT");
+        assert_ne!(GitHubAwareness::format_count(None), "0");
+    }
+
+    #[test]
+    fn observed_github_count_never_invents_zero_from_wait() {
+        assert_eq!(observed_github_count(&Value::Null), None);
+        assert_eq!(observed_github_count(&Value::String("WAIT".into())), None);
+        assert_eq!(
+            observed_github_count(&serde_json::json!({"WAIT": "GitHub repo not connected"})),
+            None
+        );
+        assert_eq!(
+            observed_github_count(&serde_json::json!({"error": "unavailable"})),
+            None
+        );
+        assert_eq!(observed_github_count(&serde_json::json!({})), None);
+        assert_ne!(observed_github_count(&Value::Null), Some(0));
+        assert_eq!(
+            format_observed_count(observed_github_count(&Value::Null)),
+            "WAIT"
+        );
+        assert_eq!(
+            observed_github_count(&serde_json::json!([])),
+            Some(0),
+            "observed empty list is a real zero"
+        );
+        assert_eq!(
+            observed_github_count(&serde_json::json!({"total_count": 0})),
+            Some(0),
+            "observed total_count 0 is a real zero"
+        );
+        assert_eq!(
+            observed_github_count(&serde_json::json!([{"id": 1}, {"id": 2}])),
+            Some(2)
+        );
+        let mixed = GitHubAwareness {
+            issue_count: Some(3),
+            pr_count: None,
+            check_count: Some(0),
+            ..GitHubAwareness::unobserved()
+        };
+        let waits = mixed.count_waits();
+        assert_eq!(waits.len(), 1);
+        assert!(waits[0].contains("pr_count"));
+        assert!(waits[0].contains("not invented as 0"));
+        assert_eq!(format_observed_count(mixed.issue_count), "3");
+        assert_eq!(format_observed_count(mixed.pr_count), "WAIT");
+        assert_eq!(format_observed_count(mixed.check_count), "0");
+        assert_ne!(format_observed_count(mixed.pr_count), "0");
+    }
+
+    #[test]
+    fn missing_verify_and_merge_ack_do_not_mint_pass_or_verified() {
+        assert_eq!(recorded_or_wait(None), EvidenceStatus::Wait);
+        assert_ne!(recorded_or_wait(None), EvidenceStatus::Pass);
+        assert_eq!(
+            recorded_or_wait(Some(EvidenceStatus::Pass)),
+            EvidenceStatus::Pass,
+            "already-recorded PASS is not invented here"
+        );
+        let parent = parent_with_child(ChildState::Assigned);
+        assert_eq!(parent.verify, None);
+        assert_eq!(parent_verify_or_wait(&parent), EvidenceStatus::Wait);
+        assert_ne!(parent_verify_or_wait(&parent), EvidenceStatus::Pass);
+        assert_ne!(parent.state, ParentState::Verified);
+
+        let mut merged = parent.clone();
+        merged.github_merged = true;
+        merged.github_merge_status = None;
+        merged.verify = None;
+        let waits = parent_evidence_waits(&[merged.clone()]);
+        assert!(waits.iter().any(|w| w.contains("merge ACK")));
+        assert!(waits.iter().any(|w| w.contains("not VERIFIED")));
+        assert!(waits.iter().any(|w| w.contains("merge status")));
+        assert!(waits.iter().all(|w| w.contains("WAIT")));
+        assert_eq!(parent_verify_or_wait(&merged), EvidenceStatus::Wait);
+
+        let mut pr = parent.clone();
+        pr.github_pr_url = Some("https://example.invalid/pr/1".into());
+        pr.github_pr_status = None;
+        let pr_waits = parent_evidence_waits(&[pr]);
+        assert!(pr_waits.iter().any(|w| w.contains("PR status")));
+        assert!(pr_waits.iter().all(|w| !w.contains("PASS") || w.contains("not invented as PASS")));
+
+        let awareness = panel(vec![merged], Vec::new(), GitHubAwareness::unobserved());
+        let json = serde_json::to_value(&awareness).unwrap();
+        assert_eq!(json["parents"][0]["verify"], Value::Null);
+        assert_ne!(json["parents"][0]["verify"], "PASS");
+        assert_ne!(json["parents"][0]["verify"], "VERIFIED");
+        let waits = json["waits"].as_array().expect("waits");
+        assert!(waits.iter().any(|w| w.as_str().unwrap().contains("not VERIFIED")));
+        assert!(waits.iter().all(|w| w.as_str().unwrap().contains("WAIT")));
+    }
+
+    #[test]
+    fn handoff_is_evidence_and_cannot_mint_working_or_pass() {
+        let parents = vec![parent_with_child(ChildState::Assigned)];
+        let mailbox = mail(vec![PeerInbox {
+            peer: "alice".into(),
+            unread: 0,
+            latest_assign: Some("assign.json".into()),
+            latest_handoff: Some("handoff.json".into()),
+        }]);
+        let view = WorkerView::from_worker(worker("alice"), &parents, &mailbox, &[]);
+        assert_eq!(view.pid, None);
+        assert_eq!(view.pid_liveness, None);
+        assert!(!view.is_observed_working());
+        assert_ne!(view.action, "working");
+        assert_eq!(view.action, "assigned");
+        let jobs = live_jobs(&parents, &[]);
+        assert_eq!(jobs[0].pid, None);
+        assert_ne!(jobs[0].action, "working");
+        assert_eq!(observed_working_jobs(&jobs), 0);
+        assert_eq!(parent_verify_or_wait(&parents[0]), EvidenceStatus::Wait);
+        assert_ne!(parent_verify_or_wait(&parents[0]), EvidenceStatus::Pass);
+        assert!(HANDOFF_IS_NOT_A_PID.contains("cannot mint working"));
+    }
+
+    #[test]
+    fn roster_name_is_not_an_observed_working_count() {
+        let view = WorkerView::from_worker(worker("alice"), &[], &empty_mail(), &[]);
+        assert_eq!(view.pid, None);
+        assert!(!view.is_observed_working());
+        assert_eq!(observed_working_workers(&[view]), 0);
+        assert_eq!(observed_working_jobs(&[]), 0);
+        assert_eq!(observed_job_count(&[]), 0);
+        let awareness = panel(Vec::new(), Vec::new(), GitHubAwareness::unobserved());
+        assert_eq!(awareness.working_worker_count(), 0);
+        assert_eq!(format_observed_count(awareness.github.issue_count), "WAIT");
+        assert_ne!(format_observed_count(awareness.github.issue_count), "0");
+        let json = serde_json::to_value(&awareness).unwrap();
+        assert_eq!(json["github"]["issue_count"], Value::Null);
+        assert_ne!(json["github"]["issue_count"], 0);
     }
 }
