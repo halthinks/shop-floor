@@ -63,6 +63,10 @@ fn open_two_floors_keeps_both_live() {
     let listed: Vec<String> = floors.list().into_iter().map(|h| h.name).collect();
     assert!(listed.contains(&"alpha".into()));
     assert!(listed.contains(&"beta".into()));
+    let shown = floors.format();
+    assert!(shown.contains("alpha"), "{shown}");
+    assert!(shown.contains("beta"), "{shown}");
+    assert!(shown.contains('*'), "{shown}");
 }
 
 #[test]
@@ -271,7 +275,11 @@ fn switch_does_not_invent_verified_or_pass() {
         .unwrap();
     floors.open(&b).unwrap();
     floors.switch(a.to_str().unwrap()).unwrap();
-    let parent = &floors.current().unwrap().state().unwrap().parents["P"];
+    let state = floors.current().unwrap().state().unwrap();
+    let parent = state
+        .parents
+        .get("P")
+        .expect("held parent must still be on A");
     assert_eq!(parent.state, ParentState::Held);
     assert_ne!(parent.state, ParentState::Verified);
     assert_ne!(parent.state, ParentState::Closed);
