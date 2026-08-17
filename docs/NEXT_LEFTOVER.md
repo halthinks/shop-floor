@@ -6,10 +6,10 @@ All reserved suite leftovers have a green merged PR. Do not invent a fifth produ
 
 Reserved leftover paths, in order, one owner:
 
-1. `src/engine.rs` — used on main (#20 / #23)
-2. `src/cli.rs` — used on main (#21, follow-up #25)
-3. `src/ui.rs` + `src/ui.html` + `src/ui.css` — used on main (#22)
-4. `src/lib.rs` — used on main (#24)
+1. `src/engine.rs` — used on main
+1. `src/cli.rs` — used on main
+1. `src/ui.rs` + `src/ui.html` + `src/ui.css` — used on main
+1. `src/lib.rs` — used on main
 
 The shop pulse is the lander. Orchestrator is not in the loop.
 
@@ -19,4 +19,4 @@ The shop pulse is the lander. Orchestrator is not in the loop.
 - AASM stays look-only. Do not vendor AASM. Do not write `C:\TextPCB Platform`. Do not open a TextPCB product lane.
 - Missing evidence is WAIT, never default PASS.
 
-Live facts at write: open reserved PRs = 0. #24 landed green. No unused reserved path remains.
+Pulse: WRITE_BRIEF — all reserved leftovers have a green merged PR; do not invent a fifth product
