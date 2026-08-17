@@ -178,13 +178,15 @@ h2 {
 
 .floor-state { color: var(--muted); font-size: 16px; letter-spacing: 0; }
 
-.child-line {
+.child-line, .job-line {
   display: grid;
-  grid-template-columns: 72px 110px 1fr;
+  grid-template-columns: 72px 110px 1fr auto;
   gap: 10px;
   padding: 6px 0;
   color: var(--ink);
 }
+
+.job-line { grid-template-columns: 1fr auto auto auto; align-items: center; }
 
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .chip {
@@ -196,6 +198,7 @@ h2 {
 }
 
 #github-repo { font-size: 14px; margin-bottom: 6px; }
+#github-counts { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
 .gh-line { padding: 5px 0; border-bottom: 1px solid var(--line); color: var(--ink); }
 .gh-line .num { color: var(--muted); margin-right: 8px; }
 .file-peek { color: var(--muted); white-space: pre-wrap; margin-top: 8px; max-height: 160px; overflow: auto; }
@@ -279,6 +282,17 @@ h2 {
 
 #send { border-bottom: 0; padding: 8px 4px; }
 
+#boss-view { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--line); }
+.boss-snap { font-size: 16px; letter-spacing: -0.02em; margin: 0 0 8px; }
+.boss-screen {
+  color: var(--muted);
+  white-space: pre-wrap;
+  margin-top: 8px;
+  max-height: 140px;
+  overflow: auto;
+  font-size: 12px;
+}
+
 #memory { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--line); }
 #memory-body .fact, #memory-body .mem-log { padding: 4px 0; color: var(--ink); }
 #memory-body .mem-log { color: var(--muted); font-size: 12px; }
@@ -308,8 +322,10 @@ h2 {
 }
 
 #mailbox h2 { margin: 0; }
+#mailbox-hold { display: flex; align-items: center; gap: 8px; }
 #mailbox-peers { display: flex; flex-wrap: wrap; gap: 16px; color: var(--muted); }
 #mailbox-peers b { color: var(--ink); font-weight: 500; }
+.pid { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
 
 .quiet { color: var(--muted); }
 .wait { color: var(--champagne); }
