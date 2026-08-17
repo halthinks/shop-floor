@@ -37,6 +37,7 @@ pub mod store;
 pub mod types;
 pub mod ui;
 pub mod workers;
+pub mod worktree;
 
 pub use aasm_map::EvidenceClass;
 pub use awareness::Awareness;
