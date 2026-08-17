@@ -90,6 +90,7 @@
       <h2>GitHub</h2>
       <p class="help">Public repos work now. Private repos need gh or a token.</p>
       <div id="github-repo"></div>
+      <div id="github-counts"></div>
       <div id="github-auth"></div>
       <form id="github-connect">
         <label class="sr">Owner <input name="owner" placeholder="owner" autocomplete="off"></label>
@@ -145,6 +146,12 @@
           <button type="submit" id="send">Send</button>
         </form>
       </div>
+      <section id="boss-view">
+        <div class="label">Boss view</div>
+        <h2>What the boss sees now</h2>
+        <p class="help">A snapshot is Evidence. It cannot verify or close.</p>
+        <div id="boss-body"></div>
+      </section>
       <section id="memory">
         <div class="label">Memory</div>
         <h2>What shop remembers</h2>
@@ -166,6 +173,7 @@
     <div class="label">Mailbox</div>
     <h2>Inbox</h2>
     <p class="help">Unread assigns per worker</p>
+    <div id="mailbox-hold"></div>
     <div id="mailbox-peers"></div>
   </footer>
 </div>
@@ -211,8 +219,43 @@ function waitWords(raw){
   if (/token|sign-in|auth|gh /i.test(s)) return 'Waiting for GitHub sign-in';
   if (/store/i.test(s)) return 'Waiting for the shop store';
   if (/not connected/i.test(s)) return 'Waiting — connect a repo';
+  if (/no process|missing pid|pid not/i.test(s)) return 'Waiting — no process yet';
+  if (/boss view/i.test(s)) return 'Waiting — boss view not written';
+  if (/no job open/i.test(s)) return 'Waiting — no job open';
   const t = s.replace(/^WAIT:\s*/i,'').trim();
   return t ? ('Waiting — ' + t) : 'Waiting';
+}
+function shownAction(action, pid){
+  const a = pillClass(action);
+  if (a === 'working' && pid == null) return 'wait';
+  return a;
+}
+function pidWords(pid, liveness, action){
+  if (pid != null) return 'pid ' + pid + (liveness ? ' ' + liveness : '');
+  if (pillClass(action) === 'assigned' || pillClass(action) === 'working') return 'Waiting — no process yet';
+  return '';
+}
+function jobLine(job){
+  const action = shownAction(job.action, job.pid);
+  const pid = pidWords(job.pid, job.pid_liveness, job.action);
+  return `<div class="job-line">
+    <span>${esc(job.parent_id)}/${esc(job.child_id)}</span>
+    <span>${esc(job.peer)}</span>
+    <span class="action-pill ${action}${action==='working'||action==='live'?' breathe':''}">${pillWord(action)}</span>
+    ${pid ? `<span class="quiet">${esc(pid)}</span>` : ''}
+  </div>`;
+}
+function renderJobs(data){
+  const w = waitOf(data);
+  const arr = asList(data);
+  if (arr) {
+    if (!arr.length) return '<div class="quiet">None yet</div>';
+    return arr.map(jobLine).join('');
+  }
+  return '<div class="quiet">' + esc(w ? waitWords(w) : 'Waiting') + '</div>';
+}
+function countOrWait(n){
+  return (n == null) ? '<span class="wait">WAIT</span>' : esc(String(n));
 }
 function eventSentence(e){
   const op = e && (e.title || e.op) || '';
@@ -277,6 +320,9 @@ async function refresh(){
   if (st.github && st.github.wait && /token|auth|sign-in/i.test(String(st.github.wait))) {
     extra += '<span class="action-pill wait">Waiting for GitHub sign-in</span>';
   }
+  (st.waits || []).slice(0, 4).forEach(w => {
+    extra += '<span class="action-pill wait">' + esc(waitWords(w)) + '</span>';
+  });
   gp.innerHTML = pill.outerHTML + extra;
 
   const proj = st.project || {};
@@ -288,10 +334,11 @@ async function refresh(){
   const roster = document.getElementById('worker-roster');
   const workers = st.workers || [];
   roster.innerHTML = workers.map(w => {
-    const action = pillClass(w.action);
+    const action = shownAction(w.action, w.pid);
     const intel = w.intelligence || {};
     const skills = w.github_skills !== false;
     const reason = action === 'idle' ? '' : esc((w.action_reason || '').split(/\s+/).slice(0,8).join(' '));
+    const pid = pidWords(w.pid, w.pid_liveness, w.action);
     return `<div class="worker-line">
       <span class="peer">${esc(w.name || w.peer)} <span class="quiet">${esc(w.peer)}</span></span>
       <form class="intel" action="/workers/${encodeURIComponent(w.peer)}/intelligence" method="post">
@@ -305,6 +352,7 @@ async function refresh(){
       </form>
       <span class="state">
         <span class="action-pill ${action}${action==='working'||action==='live'?' breathe':''}">${pillWord(action)}</span>
+        ${pid ? `<span class="pid">${esc(pid)}</span>` : ''}
         ${reason ? `<span class="reason">${reason}</span>` : ''}
       </span>
     </div>`;
@@ -315,11 +363,13 @@ async function refresh(){
   document.getElementById('merge-parent').value = verified ? verified.id : '';
   document.getElementById('merge-btn').disabled = !verified;
 
+  refreshMailbox(st);
+
   const box = document.getElementById('mailbox-peers');
-  if (st.mailbox && st.mailbox.wait) box.innerHTML = `<span class="wait">${esc(st.mailbox.wait)}</span>`;
+  if (st.mailbox && st.mailbox.wait) box.innerHTML = `<span class="wait">${esc(waitWords(st.mailbox.wait))}</span>`;
   else if (st.mailbox && st.mailbox.peers && st.mailbox.peers.length) {
     box.innerHTML = st.mailbox.peers.map(p => `<span>${esc(p.peer)} <b>${p.unread}</b></span>`).join('');
-  }   else box.innerHTML = '<span>No unread assigns</span>';
+  } else box.innerHTML = '<span>No unread assigns</span>';
 
   const feed = document.getElementById('feed-list');
   const events = st.events || [];
@@ -331,12 +381,17 @@ async function refresh(){
   refreshFloor();
   refreshSteer();
   refreshMemory();
+  refreshBoss();
   refreshProject();
 }
 
 async function refreshGithub(){
   const g = await j(selectedPull ? '/api/github?pull='+encodeURIComponent(selectedPull) : '/api/github');
   document.getElementById('github-repo').textContent = g.repo || 'Waiting — connect a repo';
+  document.getElementById('github-counts').innerHTML =
+    'issues ' + countOrWait(g.issue_count) +
+    ' · pulls ' + countOrWait(g.pr_count) +
+    ' · checks ' + countOrWait(g.check_count);
   document.getElementById('github-auth').innerHTML = g.authenticated
     ? '<div class="quiet">Signed in. Private repos are available.</div>'
     : '<div class="quiet">Public repos work now. Private repos need gh or a token.</div>';
@@ -364,8 +419,11 @@ async function refreshFloor(){
   const f = await j('/api/floor');
   const floor = document.getElementById('floor-body');
   const cur = f.current;
+  const jobsHtml = '<div class="label">Live jobs</div>' + renderJobs(f.jobs);
+  const note = f.evidence_note ? '<div class="quiet">'+esc(f.evidence_note)+'</div>' : '';
   if (!cur) {
-    floor.innerHTML = '<div class="floor-headline">No job open. SuperGrokHeavy starts one, or type open in the panel below.</div>';
+    floor.innerHTML = '<div class="floor-headline">No job open. SuperGrokHeavy starts one, or type open in the panel below.</div>'
+      + jobsHtml + note;
     return;
   }
   const kids = (f.children||[]).map(c =>
@@ -374,7 +432,43 @@ async function refreshFloor(){
   const chips = (f.claims||[]).flatMap(x => x.paths||[]).map(path => `<span class="chip">${esc(path)}</span>`).join('');
   floor.innerHTML = `<div class="floor-headline">${esc(cur.id)} <span class="floor-state">${esc(cur.state)}</span></div>
     <div class="label">Assigned work</div>${kids || '<div class="quiet">None yet</div>'}
-    <div class="label">Locked files</div>${chips?`<div class="chips">${chips}</div>`:'<div class="quiet">None yet</div>'}`;
+    <div class="label">Locked files</div>${chips?`<div class="chips">${chips}</div>`:'<div class="quiet">None yet</div>'}
+    ${jobsHtml}${note}`;
+}
+
+async function refreshMailbox(){
+  const mbx = await j('/api/mailbox');
+  const hold = document.getElementById('mailbox-hold');
+  if (mbx.observation && mbx.observation.wait) {
+    hold.innerHTML = '<span class="action-pill wait">' + esc(waitWords(mbx.observation.wait)) + '</span>';
+    return;
+  }
+  if (mbx.hold_in_flight) {
+    hold.innerHTML = '<span class="action-pill wait">HOLD</span><span class="quiet"> unread assign in flight; not PASS</span>';
+    return;
+  }
+  hold.innerHTML = '<span class="quiet">No unread assign in flight</span>';
+}
+
+async function refreshBoss(){
+  const b = await j('/api/boss');
+  const el = document.getElementById('boss-body');
+  if (b.WAIT) {
+    el.innerHTML = '<div class="quiet">' + esc(waitWords(b.WAIT)) + '</div>'
+      + '<div class="quiet">' + esc(b.note || 'A snapshot is Evidence. It cannot verify or close.') + '</div>';
+    return;
+  }
+  const cur = b.current;
+  const headline = cur ? (String(cur.id||'') + ' ' + String(cur.state||'')) : 'Waiting — no job open';
+  const kids = Array.isArray(b.children) ? b.children : [];
+  const kidHtml = kids.length
+    ? kids.map(c => `<div class="child-line"><span>${esc(c.id)}</span><span>${esc(c.state)}</span><span>${esc(c.peer)}</span></div>`).join('')
+    : '<div class="quiet">None yet</div>';
+  const cls = b.class || b.status || 'Evidence';
+  const screen = b.screen ? '<div class="boss-screen">' + esc(String(b.screen).slice(0, 800)) + '</div>' : '';
+  el.innerHTML = `<div class="boss-snap">${esc(headline)}</div>
+    <div class="quiet">${esc(cls)} · Evidence only; cannot verify or close</div>
+    ${kidHtml}${screen}`;
 }
 
 async function refreshSteer(){

@@ -1,5 +1,12 @@
 //! Localhost command center. No Electron. No npm. One binary.
+//!
+//! Suite surface for awareness + mailbox + floor. Missing pieces are WAIT.
+//! An unread assign is HOLD, not PASS. A mailbox handoff is Evidence and
+//! cannot CLOSE. GitHub counts stay null when the list is WAIT — never invent
+//! a zero. A boss view file is Evidence of what the floor said now; a picture
+//! cannot VERIFY. This file never writes `C:\TextPCB Platform`.
 
+use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -193,7 +200,19 @@ fn route(app: &Mutex<Shop>, method: &str, path: &str, body: &str) -> (String, St
         }
         ("GET", "/api/floor") => {
             let shop = app.lock().unwrap_or_else(|e| e.into_inner());
-            json_ok(serde_json::to_value(shop.floor()).unwrap_or(json!({})))
+            json_ok(floor_payload(&shop))
+        }
+        ("GET", "/api/mailbox") => {
+            let shop = app.lock().unwrap_or_else(|e| e.into_inner());
+            json_ok(mailbox_payload(&shop))
+        }
+        ("GET", "/api/boss") => {
+            let shop = app.lock().unwrap_or_else(|e| e.into_inner());
+            json_ok(boss_payload(&shop))
+        }
+        ("GET", "/api/jobs") => {
+            let shop = app.lock().unwrap_or_else(|e| e.into_inner());
+            json_ok(jobs_payload(&shop))
         }
         ("GET", "/api/events") => {
             let shop = app.lock().unwrap_or_else(|e| e.into_inner());
@@ -413,8 +432,105 @@ fn github_module(shop: &Shop, pull: Option<String>) -> Value {
         "selected_pull": selected,
         "merge_parent": verified,
         "merge_enabled": verified.is_some(),
+        "issue_count": list_count(&issues),
+        "pr_count": list_count(&pulls),
+        "check_count": list_count(&checks),
+        "count_note": "null count is WAIT; never invent a zero",
         "skills": crate::skills::SKILL_PACK,
     })
+}
+
+fn list_count(v: &Value) -> Value {
+    if let Some(arr) = v.as_array() {
+        return json!(arr.len() as u64);
+    }
+    if let Some(items) = v.get("items").and_then(|x| x.as_array()) {
+        return json!(items.len() as u64);
+    }
+    if let Some(runs) = v.get("check_runs").and_then(|x| x.as_array()) {
+        return json!(runs.len() as u64);
+    }
+    json!(null)
+}
+
+fn floor_payload(shop: &Shop) -> Value {
+    let mut v = serde_json::to_value(shop.floor()).unwrap_or(json!({}));
+    if let Some(obj) = v.as_object_mut() {
+        if obj.get("current").map(|c| c.is_null()).unwrap_or(true) {
+            obj.insert("wait".into(), json!("WAIT: no job open"));
+        }
+        obj.insert(
+            "evidence_note".into(),
+            json!("floor memory is Evidence; not VERIFIED; not CLOSE"),
+        );
+        match jobs_payload(shop) {
+            jobs if jobs.get("WAIT").is_some() => {
+                obj.insert("jobs".into(), jobs);
+            }
+            jobs => {
+                obj.insert(
+                    "jobs".into(),
+                    jobs.get("jobs").cloned().unwrap_or(json!("WAIT")),
+                );
+            }
+        }
+    }
+    v
+}
+
+fn jobs_payload(shop: &Shop) -> Value {
+    match shop.awareness(None) {
+        Ok(a) => {
+            let jobs = a.jobs_from_workers();
+            json!({
+                "jobs": jobs,
+                "count": jobs.len() as u64,
+                "working": crate::awareness::observed_working_jobs(&jobs) as u64,
+                "count_note": "count is observed length; missing pid is WAIT; never invent working",
+            })
+        }
+        Err(e) => json!({
+            "WAIT": e.to_string(),
+            "jobs": "WAIT",
+            "count": null,
+            "working": null,
+            "count_note": "null count is WAIT; never invent a zero",
+        }),
+    }
+}
+
+fn mailbox_payload(shop: &Shop) -> Value {
+    let observation = shop.observe_mailbox();
+    let hold_in_flight = observation.hold_in_flight();
+    json!({
+        "observation": observation,
+        "hold_in_flight": hold_in_flight,
+        "one_assign_in_flight": crate::mailbox::ONE_ASSIGN_IN_FLIGHT,
+        "handoff_is_evidence": crate::mailbox::HANDOFF_IS_EVIDENCE,
+        "hold_unread": crate::mailbox::HOLD_UNREAD,
+        "fifth_product": crate::mailbox::FIFTH_PRODUCT,
+    })
+}
+
+fn boss_payload(shop: &Shop) -> Value {
+    let path = shop.store_root().join("boss").join("view.json");
+    if !path.is_file() {
+        return json!({
+            "WAIT": "boss view not written",
+            "kind": "live_floor_view",
+            "status": "WAIT",
+            "class": "INFORMATION_GAP",
+            "note": "a picture is Evidence; cannot VERIFY or CLOSE",
+        });
+    }
+    match fs::read_to_string(&path) {
+        Ok(raw) => match serde_json::from_str::<Value>(&raw) {
+            Ok(v) if v.is_object() => v,
+            Ok(_) => json!({"WAIT": "boss view is not an object"}),
+            Err(e) => json!({"WAIT": format!("boss view unreadable: {e}")}),
+        },
+        Err(e) => json!({"WAIT": format!("boss view unreadable: {e}")}),
+    }
 }
 
 fn github_search(shop: &Shop, q: String, kind: String) -> Value {
