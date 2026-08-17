@@ -10,6 +10,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::aasm_map::EvidenceClass;
 use crate::hash::unix_now;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,8 +85,8 @@ impl ChildState {
     }
 }
 
-/// PASS is recorded only when `shop verify` captured a successful command.
-/// Anything else is WAIT. Shop never invents PASS.
+/// Shop CLI word. Internally paired with [`crate::aasm_map::EvidenceClass`].
+/// WAIT is INCONCLUSIVE | INFORMATION_GAP | UNKNOWN — never promoted to PASS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum EvidenceStatus {
@@ -129,6 +130,9 @@ pub struct Child {
     pub dispatched: bool,
     pub handoff: Option<Handoff>,
     pub bounce_reason: Option<String>,
+    /// Causal backjump note. Not an AASM type named bounce.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backjump_note: Option<String>,
     /// Intended child ref `shop/<parent>/<child>`. Recorded even when not created.
     #[serde(default)]
     pub branch: Option<String>,
@@ -148,6 +152,7 @@ impl Child {
             dispatched: false,
             handoff: None,
             bounce_reason: None,
+            backjump_note: None,
             branch: None,
             branch_created: false,
         }
@@ -160,7 +165,26 @@ pub struct VerifyRecord {
     pub exit_code: Option<i32>,
     pub last_lines: String,
     pub status: EvidenceStatus,
+    #[serde(default)]
+    pub class: EvidenceClass,
+    #[serde(default)]
+    pub aasm_note: String,
     pub recorded_at: u64,
+}
+
+impl VerifyRecord {
+    pub fn classify(mut self) -> Self {
+        self.class =
+            crate::aasm_map::classify_verify(self.status, self.exit_code, &self.last_lines);
+        if self.status == EvidenceStatus::Pass && self.class != EvidenceClass::Pass {
+            self.status = EvidenceStatus::Wait;
+        }
+        if self.class != EvidenceClass::Pass {
+            self.status = EvidenceStatus::Wait;
+        }
+        self.aasm_note = crate::aasm_map::note_for(self.class).to_string();
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,6 +211,11 @@ pub struct Parent {
     pub github_merge_status: Option<EvidenceStatus>,
     #[serde(default)]
     pub github_merge_reason: Option<String>,
+    /// AuthorityLease scope. Empty means children define claims; overlap still rejected.
+    #[serde(default)]
+    pub claimed_paths: Vec<String>,
+    #[serde(default)]
+    pub lease_note: String,
     pub opened_at: u64,
     pub updated_at: u64,
 }
@@ -210,6 +239,8 @@ impl Parent {
             github_merged: false,
             github_merge_status: None,
             github_merge_reason: None,
+            claimed_paths: Vec::new(),
+            lease_note: String::new(),
             opened_at: now,
             updated_at: now,
         }
@@ -265,6 +296,9 @@ pub struct ReducePackage {
     pub pull_request_status: EvidenceStatus,
     #[serde(default)]
     pub pull_request_reason: Option<String>,
+    /// Shop evidence listing. Not an AASM recombine claim.
+    #[serde(default)]
+    pub aasm_note: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

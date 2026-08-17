@@ -13,9 +13,9 @@ use shop::error::ShopError;
 use shop::mailbox::STEER_TO;
 use shop::mailbox::{AssignRecord, CLAIM_CEILING, DEFAULT_FROM, SCHEMA_VERSION};
 use shop::skills::GitHubSkills;
-use shop::types::{Child, ChildState, EvidenceStatus, ParentState};
+use shop::types::{Child, ChildState, EvidenceStatus, ParentState, VerifyRecord};
 use shop::ui::{self, PAGE};
-use shop::{MockGitHub, Shop, SKILL_PACK};
+use shop::{EvidenceClass, MockGitHub, Shop, SKILL_PACK};
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -395,15 +395,14 @@ fn seeded_workers_are_on_the_roster() {
     let assign_files = fs::read_dir(&outbox)
         .map(|rd| {
             rd.flatten()
-                .filter(|e| {
-                    e.file_name()
-                        .to_string_lossy()
-                        .starts_with("assign-")
-                })
+                .filter(|e| e.file_name().to_string_lossy().starts_with("assign-"))
                 .count()
         })
         .unwrap_or(0);
-    assert_eq!(assign_files, 0, "seed must not write assigns until shop split");
+    assert_eq!(
+        assign_files, 0,
+        "seed must not write assigns until shop split"
+    );
 }
 
 #[test]
@@ -855,6 +854,139 @@ fn steer_reply_file_is_ingested_into_api_steer() {
     let body = http_get(&host, "/api/steer");
     assert!(body.contains("I see the floor."), "{body}");
     assert!(body.contains("orchestrator"), "{body}");
+}
+
+#[test]
+fn aasm_information_does_not_carry_authority() {
+    let dir = tmp_store();
+    let mailbox = dir.join("bridge");
+    fs::create_dir_all(mailbox.join("inbox/shop")).unwrap();
+    let mut shop = Shop::init(dir.join("store"))
+        .unwrap()
+        .with_mailbox(Some(mailbox.clone()));
+    enroll(&mut shop, &["alice"]);
+    shop.open("P", "t", "b").unwrap();
+    shop.split("P", "c1", "alice", "src/a", "t", "b").unwrap();
+    shop.accept("P", "c1", r#"{"status":"PASS"}"#).unwrap();
+    let p = shop.state().unwrap().parents["P"].clone();
+    assert_ne!(p.state, ParentState::Verified);
+    assert_ne!(p.state, ParentState::Closed);
+    fs::write(
+        mailbox.join("inbox/shop/r.json"),
+        r#"{"type":"steer-reply","from":"cursor-groksuperheavy","body":"checks passed"}"#,
+    )
+    .unwrap();
+    shop.ingest_replies().unwrap();
+    let p = shop.state().unwrap().parents["P"].clone();
+    assert_ne!(p.state, ParentState::Verified);
+    assert_ne!(p.state, ParentState::Closed);
+}
+
+#[test]
+fn aasm_incomplete_evidence_cannot_verify_or_close() {
+    let (mut shop, _dir) = fresh();
+    ready_two_children(&mut shop);
+    shop.join("P").unwrap();
+    shop.reduce("P", "pkg").unwrap();
+    let rec = shop.verify("P", None).unwrap();
+    assert_eq!(rec.status, EvidenceStatus::Wait);
+    assert_eq!(rec.class, EvidenceClass::InformationGap);
+    assert_ne!(
+        shop.state().unwrap().parents["P"].state,
+        ParentState::Verified
+    );
+    assert!(matches!(
+        shop.close("P").unwrap_err(),
+        ShopError::CannotClose(_)
+    ));
+}
+
+#[test]
+fn aasm_cannot_close_while_child_assigned() {
+    let (mut shop, dir) = fresh();
+    enroll(&mut shop, &["alice"]);
+    shop.open("P", "t", "b").unwrap();
+    shop.split("P", "c1", "alice", "src/a", "t", "b").unwrap();
+    let mut state = shop.state().unwrap();
+    {
+        let p = state.parents.get_mut("P").unwrap();
+        p.state = ParentState::Verified;
+        p.verify = Some(
+            VerifyRecord {
+                cmd: "true".into(),
+                exit_code: Some(0),
+                last_lines: String::new(),
+                status: EvidenceStatus::Pass,
+                class: EvidenceClass::Pass,
+                aasm_note: String::new(),
+                recorded_at: 1,
+            }
+            .classify(),
+        );
+    }
+    fs::write(
+        dir.join("snapshot.json"),
+        serde_json::to_vec_pretty(&state).unwrap(),
+    )
+    .unwrap();
+    drop(shop);
+    let mut shop = Shop::open_store(&dir).unwrap();
+    assert_eq!(
+        shop.state().unwrap().parents["P"].children["c1"].state,
+        ChildState::Assigned
+    );
+    assert!(matches!(
+        shop.close("P").unwrap_err(),
+        ShopError::ObligationOpen(_)
+    ));
+}
+
+#[test]
+fn aasm_backjump_keeps_unrelated_joined_children() {
+    let (mut shop, _dir) = fresh();
+    enroll(&mut shop, &["alice", "bob"]);
+    shop.open("P", "t", "b").unwrap();
+    shop.split("P", "c1", "alice", "src/a", "t", "b").unwrap();
+    shop.split("P", "c2", "bob", "src/b", "t", "b").unwrap();
+    shop.accept("P", "c2", r#"{"status":"DONE"}"#).unwrap();
+    let bounced = shop.bounce("P", "c1", "conflict").unwrap();
+    assert_eq!(bounced.peer, "alice");
+    assert_eq!(bounced.paths, vec!["src/a"]);
+    assert!(bounced
+        .backjump_note
+        .as_deref()
+        .unwrap_or("")
+        .contains("backjump"));
+    let p = shop.state().unwrap().parents["P"].clone();
+    assert_eq!(p.children["c2"].state, ChildState::Joined);
+    assert_eq!(p.children["c2"].peer, "bob");
+    assert_eq!(p.children["c2"].paths, vec!["src/b"]);
+    assert_eq!(p.children["c1"].state, ChildState::Bounced);
+}
+
+#[test]
+fn aasm_parent_subset_refuses_paths_outside_lease() {
+    let (mut shop, _dir) = fresh();
+    enroll(&mut shop, &["alice", "bob"]);
+    shop.open_with_scope("P", "t", "b", "src/a,src/b").unwrap();
+    let err = shop
+        .split("P", "c1", "alice", "src/c", "t", "b")
+        .unwrap_err();
+    assert!(matches!(err, ShopError::ParentSubset { .. }));
+    shop.split("P", "c1", "alice", "src/a", "t", "b").unwrap();
+    let err = shop.split("P", "c2", "bob", "src/a", "t", "b").unwrap_err();
+    assert!(matches!(err, ShopError::PathOverlap { .. }));
+}
+
+#[test]
+fn aasm_reduce_is_shop_evidence_not_recombine() {
+    let (mut shop, _dir) = fresh();
+    ready_two_children(&mut shop);
+    shop.join("P").unwrap();
+    let pkg = shop.reduce("P", "pkg").unwrap();
+    let v = serde_json::to_value(&pkg).unwrap();
+    assert!(v.get("recombine").is_none());
+    assert!(pkg.aasm_note.contains("not AASM recombine"));
 }
 
 #[test]

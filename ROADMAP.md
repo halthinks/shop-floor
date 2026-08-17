@@ -2,6 +2,8 @@
 
 This PR is the floor: hold-split-join, workers as capacity, GitHub (public now, private with token), project picker, Talk to the boss, shop memory, floor memory, file-based reply ingest.
 
+Shop obeys AASM and does not copy it. See `src/aasm_map.rs` for the shop-word → AASM 0.56.1 dictionary (backjump, evidence class, lease/parent-subset). Reduce is not AASM recombine.
+
 Next, in order:
 
 1. Run workers

@@ -43,6 +43,16 @@ pub enum ShopError {
     #[error("cannot close parent '{0}': not VERIFIED (incomplete evidence is WAIT)")]
     CannotClose(String),
 
+    #[error(
+        "cannot close/complete parent '{0}': mandatory child still ASSIGNED (obligation open)"
+    )]
+    ObligationOpen(String),
+
+    #[error(
+        "child path '{path}' is outside parent '{parent}' claimed set (parent-subset; child cannot amplify scope)"
+    )]
+    ParentSubset { path: String, parent: String },
+
     #[error("invalid parent state {current} for {op}")]
     InvalidParentState {
         current: ParentState,

@@ -14,7 +14,7 @@ Add a worker and assign intelligence in the Workers column (backend + model). Se
 
 `shop add --peer alice --name Alice --backend grok-bot` is the same store write for tests and scripts.
 
-`shop` is not [AASM](https://github.com/halthinks/AASM) and not T3 Code. AASM stays the authority calculus.
+`shop` is not [AASM](https://github.com/halthinks/AASM) and not T3 Code. Shop obeys AASM; it does not copy it. Floor words (`bounce`, `WAIT`, `held`, reduce, verify PASS) map onto AASM 0.56.1 classes in `src/aasm_map.rs` — causal backjump, INCONCLUSIVE/INFORMATION_GAP/UNKNOWN, AuthorityLease parent-subset, evidence-plane certificate, EffectStatus analog. Reduce is a shop package, not AASM recombine.
 
 ## Hold-split-join
 

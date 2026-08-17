@@ -443,18 +443,33 @@ impl Shop {
     }
 
     pub fn open(&mut self, id: &str, title: &str, body: &str) -> Result<Parent> {
+        self.open_with_scope(id, title, body, "")
+    }
+
+    /// Open a parent lease. Optional claimed paths are parent-subset scope.
+    /// Empty paths: children define claims; overlap is still rejected.
+    pub fn open_with_scope(
+        &mut self,
+        id: &str,
+        title: &str,
+        body: &str,
+        paths_csv: &str,
+    ) -> Result<Parent> {
         validate_id(id)?;
         let mut state = self.store.load()?;
         if state.parents.contains_key(id) {
             return Err(ShopError::ParentExists(id.to_string()));
         }
-        let parent = Parent::new(id.to_string(), title.to_string(), body.to_string());
+        let mut parent = Parent::new(id.to_string(), title.to_string(), body.to_string());
+        parent.claimed_paths = crate::paths::parse_paths(paths_csv);
+        parent.lease_note = crate::aasm_map::LEASE_NOTE.to_string();
         state.parents.insert(id.to_string(), parent.clone());
         self.store.save(&state)?;
         self.event(json!({
             "op": "open",
             "parent": id,
             "state": "HELD",
+            "aasm_note": crate::aasm_map::LEASE_NOTE,
         }))?;
         self.note_memory(&format!("job opened {id} HELD"))?;
         Ok(parent)
@@ -489,6 +504,14 @@ impl Shop {
             .parents
             .get_mut(parent_id)
             .ok_or_else(|| ShopError::ParentNotFound(parent_id.to_string()))?;
+        if let Some(path) =
+            crate::aasm_map::paths_within_parent_scope(&paths, &parent.claimed_paths)
+        {
+            return Err(ShopError::ParentSubset {
+                path,
+                parent: parent_id.to_string(),
+            });
+        }
         if !parent.state.allows_split() {
             return Err(ShopError::InvalidParentState {
                 current: parent.state,
@@ -665,6 +688,7 @@ impl Shop {
             child.state = ChildState::Bounced;
             child.dispatched = false;
             child.bounce_reason = Some(reason.to_string());
+            child.backjump_note = Some(crate::aasm_map::BACKJUMP_NOTE.to_string());
         }
         parent.state = ParentState::InFlight;
         parent.touch();
@@ -677,7 +701,7 @@ impl Shop {
             "peer": bounced.peer,
             "paths": bounced.paths,
             "reason": reason,
-            "note": "bounce stays tied to the same peer and paths",
+            "note": crate::aasm_map::BACKJUMP_NOTE,
         }))?;
         self.note_memory(&format!(
             "bounce {parent_id}/{child_id} stays peer={} paths={}",
@@ -773,6 +797,7 @@ impl Shop {
             pull_request_number: pr_number,
             pull_request_status: pr_status,
             pull_request_reason: pr_reason,
+            aasm_note: crate::aasm_map::REDUCE_NOT_RECOMBINE.to_string(),
         };
         self.store.save(&state)?;
         if let Some(p) = state.parents.get(parent_id) {
@@ -808,19 +833,33 @@ impl Shop {
             None => parent.verify_cmd.clone(),
         };
 
+        let assigned_open = parent
+            .children
+            .values()
+            .any(|c| c.state == ChildState::Assigned);
         let mut record = match cmd {
             None => VerifyRecord {
                 cmd: String::new(),
                 exit_code: None,
                 last_lines: "no verify command recorded".into(),
                 status: EvidenceStatus::Wait,
+                class: Default::default(),
+                aasm_note: String::new(),
                 recorded_at: unix_now(),
-            },
+            }
+            .classify(),
             Some(cmd) => {
                 parent.verify_cmd = Some(cmd.clone());
                 run_verify_command(&cmd)
             }
         };
+        if assigned_open && record.status == EvidenceStatus::Pass {
+            record.status = EvidenceStatus::Wait;
+            record.last_lines = format!(
+                "{}\nmandatory child still ASSIGNED (obligation open)",
+                record.last_lines
+            );
+        }
         if let Some(reason) = self.github_verify_block(parent) {
             record.status = EvidenceStatus::Wait;
             if !record.last_lines.is_empty() {
@@ -828,10 +867,11 @@ impl Shop {
             }
             record.last_lines.push_str(&reason);
         }
+        record = record.classify();
         parent.verify = Some(record.clone());
-        parent.state = match record.status {
-            EvidenceStatus::Pass => ParentState::Verified,
-            EvidenceStatus::Wait => ParentState::VerifyWait,
+        parent.state = match record.class {
+            crate::aasm_map::EvidenceClass::Pass => ParentState::Verified,
+            _ => ParentState::VerifyWait,
         };
         parent.touch();
         self.store.save(&state)?;
@@ -930,13 +970,13 @@ impl Shop {
             Ok(v) => {
                 parent.github_merged = true;
                 parent.github_merge_status = Some(EvidenceStatus::Pass);
-                parent.github_merge_reason = None;
+                parent.github_merge_reason = Some(crate::aasm_map::MERGE_ACK_NOTE.to_string());
                 self.store.save(&state)?;
                 self.event(json!({
                     "op": "merge",
                     "parent": parent_id,
                     "pull": n,
-                    "note": "automatic only after VERIFIED",
+                    "note": crate::aasm_map::MERGE_ACK_NOTE,
                 }))?;
                 Ok(v)
             }
@@ -963,6 +1003,14 @@ impl Shop {
                     .as_ref()
                     .is_some_and(|v| v.status == EvidenceStatus::Pass && v.exit_code == Some(0))
         };
+        let assigned_open = state
+            .parents
+            .get(parent_id)
+            .map(|p| p.children.values().any(|c| c.state == ChildState::Assigned))
+            .unwrap_or(false);
+        if assigned_open {
+            return Err(ShopError::ObligationOpen(parent_id.to_string()));
+        }
         if !verified {
             return Err(ShopError::CannotClose(parent_id.to_string()));
         }
@@ -1569,8 +1617,11 @@ fn run_verify_command(cmd: &str) -> VerifyRecord {
             exit_code: None,
             last_lines: format!("command failed to execute: {e}"),
             status: EvidenceStatus::Wait,
+            class: Default::default(),
+            aasm_note: String::new(),
             recorded_at,
-        },
+        }
+        .classify(),
         Ok(out) => {
             let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
             if !out.stderr.is_empty() {
@@ -1593,8 +1644,11 @@ fn run_verify_command(cmd: &str) -> VerifyRecord {
                 exit_code,
                 last_lines,
                 status,
+                class: Default::default(),
+                aasm_note: String::new(),
                 recorded_at,
             }
+            .classify()
         }
     }
 }

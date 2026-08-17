@@ -11,6 +11,7 @@
 //! - shop never invents a child lane. Only `shop split` creates children.
 //! - shop never writes outside the shop store and optional mailbox outbox.
 
+pub mod aasm_map;
 pub mod awareness;
 pub mod cli;
 pub mod engine;
@@ -34,6 +35,7 @@ pub mod types;
 pub mod ui;
 pub mod workers;
 
+pub use aasm_map::EvidenceClass;
 pub use awareness::Awareness;
 pub use engine::Shop;
 pub use error::{Result, ShopError};

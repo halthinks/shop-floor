@@ -42,6 +42,8 @@ pub struct FloorChild {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bounce_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backjump_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<FloorHandoff>,
 }
 
@@ -54,6 +56,10 @@ pub struct FloorHistoryLine {
     pub body: String,
     #[serde(default)]
     pub children: Vec<FloorChild>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aasm_class: Option<crate::aasm_map::EvidenceClass>,
+    #[serde(default)]
+    pub aasm_note: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +150,7 @@ fn child_from(parent_id: &str, c: &crate::types::Child) -> FloorChild {
         paths: c.paths.clone(),
         state: c.state,
         bounce_reason: c.bounce_reason.clone(),
+        backjump_note: c.backjump_note.clone(),
         handoff: c.handoff.as_ref().map(|h| FloorHandoff {
             hash: h.hash.clone(),
             status: h.status.clone(),
@@ -152,6 +159,13 @@ fn child_from(parent_id: &str, c: &crate::types::Child) -> FloorChild {
 }
 
 pub fn history_from_parent(parent: &Parent) -> FloorHistoryLine {
+    let (aasm_class, aasm_note) = match &parent.verify {
+        Some(v) => (Some(v.class), v.aasm_note.clone()),
+        None if parent.state == ParentState::Reduced => {
+            (None, crate::aasm_map::REDUCE_NOT_RECOMBINE.to_string())
+        }
+        None => (None, String::new()),
+    };
     FloorHistoryLine {
         at: format_rfc3339(unix_now()),
         id: parent.id.clone(),
@@ -163,6 +177,8 @@ pub fn history_from_parent(parent: &Parent) -> FloorHistoryLine {
             .values()
             .map(|c| child_from(&parent.id, c))
             .collect(),
+        aasm_class,
+        aasm_note,
     }
 }
 
@@ -301,6 +317,7 @@ fn child_to_types(c: &FloorChild) -> crate::types::Child {
     );
     child.state = c.state;
     child.bounce_reason = c.bounce_reason.clone();
+    child.backjump_note = c.backjump_note.clone();
     child.handoff = c.handoff.as_ref().map(|h| crate::types::Handoff {
         hash: h.hash.clone(),
         status: h.status.clone(),
