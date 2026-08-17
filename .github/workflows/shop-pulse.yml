@@ -1,0 +1,55 @@
+# Shop pulse. Scheduled lander. Orchestrator is not in the loop.
+name: Shop pulse
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  actions: read
+
+concurrency:
+  group: shop-pulse
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pulse:
+    name: Shop pulse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Fail-closed pulse tests
+        run: cargo test --test pulse
+
+      - name: Live pulse (land or name leftover)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: cargo run --bin shop-pulse -- live --apply --repo "${{ github.repository }}" --roadmap docs/SUITE_ROADMAP.md --brief docs/NEXT_LEFTOVER.md
+
+      - name: Commit leftover brief when it changes
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "shop-pulse"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/NEXT_LEFTOVER.md
+          if git diff --cached --quiet; then
+            echo "leftover brief unchanged"
+          else
+            git commit -m "shop pulse: name the leftover (Orchestrator is not in the loop)"
+            git push
+          fi
