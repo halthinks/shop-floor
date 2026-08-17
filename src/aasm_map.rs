@@ -38,6 +38,18 @@ pub const AASM_PIN: &str = "0.56.1";
 /// This file is a dictionary, not a second kernel.
 pub const COPIES_KERNEL: bool = false;
 
+/// bounce is a shop word for causal backjump. AASM has no kernel type named bounce.
+pub const BOUNCE_IS_KERNEL_TYPE: bool = false;
+
+/// Shop WAIT is exactly these three AASM evidence classes. Not PASS.
+pub const WAIT_CLASS_NOTE: &str = "INCONCLUSIVE | INFORMATION_GAP | UNKNOWN";
+
+pub const WAIT_CLASSES: [EvidenceClass; 3] = [
+    EvidenceClass::Inconclusive,
+    EvidenceClass::InformationGap,
+    EvidenceClass::Unknown,
+];
+
 /// AASM evidence-plane class. Shop CLI may still print WAIT; this is what is stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -65,8 +77,13 @@ impl EvidenceClass {
     }
 
     /// Shop WAIT is these three classes. PASS is not WAIT and cannot be promoted from them.
+    /// Fail-closed: any class that is not recorded PASS is WAIT.
     pub fn is_shop_wait(self) -> bool {
         !matches!(self, Self::Pass)
+    }
+
+    pub fn is_wait_class(self) -> bool {
+        WAIT_CLASSES.contains(&self)
     }
 
     pub fn to_shop_status(self) -> EvidenceStatus {
@@ -94,6 +111,24 @@ pub const MERGE_ACK_NOTE: &str =
 pub const INFORMATION_NOT_AUTHORITY: &str =
     "handoff/mailbox/github check is Evidence; cannot CLOSE or mark VERIFIED";
 
+fn normalize_shop_word(word: &str) -> String {
+    word.trim().to_ascii_lowercase().replace('_', " ")
+}
+
+/// Look-only dictionary: shop floor word → AASM meaning. Not a kernel copy.
+/// bounce is causal backjump, not a kernel type named bounce.
+pub fn map_shop_word(word: &str) -> Option<&'static str> {
+    match normalize_shop_word(word).as_str() {
+        "bounce" => Some(BACKJUMP_NOTE),
+        "wait" => Some(WAIT_CLASS_NOTE),
+        "held" | "parent open" => Some(LEASE_NOTE),
+        "reduce" | "recombine" => Some(REDUCE_NOT_RECOMBINE),
+        "verify pass" => Some(VERIFY_PASS_NOTE),
+        "merge" | "merge ack" | "command ack" => Some(MERGE_ACK_NOTE),
+        _ => None,
+    }
+}
+
 const GAP_MARKERS: &[&str] = &[
     "missing",
     "no verify",
@@ -115,10 +150,29 @@ const GAP_MARKERS: &[&str] = &[
     "fact authority",
 ];
 
-const INCONCLUSIVE_MARKERS: &[&str] = &["fail", "exit", "conflict"];
+const INCONCLUSIVE_MARKERS: &[&str] = &["fail", "exit", "conflict", "inconclusive"];
+
+/// Shop WAIT words and invented-authority text. Never PASS, even when the
+/// classified wait class is UNKNOWN (Unknown must not fall through to Pass).
+const WAIT_BLOCK_MARKERS: &[&str] = &[
+    "wait",
+    "unknown",
+    "inconclusive",
+    "incomplete",
+    "verified",
+    "bounce",
+    "backjump",
+];
 
 fn has_marker(hay: &str, markers: &[&str]) -> bool {
     markers.iter().any(|m| hay.contains(m))
+}
+
+fn line_blocks_pass(reason: &str) -> bool {
+    let r = reason.to_ascii_lowercase();
+    has_marker(&r, GAP_MARKERS)
+        || has_marker(&r, INCONCLUSIVE_MARKERS)
+        || has_marker(&r, WAIT_BLOCK_MARKERS)
 }
 
 pub fn classify_wait_reason(reason: &str) -> EvidenceClass {
@@ -127,6 +181,10 @@ pub fn classify_wait_reason(reason: &str) -> EvidenceClass {
         EvidenceClass::InformationGap
     } else if has_marker(&r, INCONCLUSIVE_MARKERS) {
         EvidenceClass::Inconclusive
+    } else if r.contains("unknown") {
+        EvidenceClass::Unknown
+    } else if has_marker(&r, WAIT_BLOCK_MARKERS) {
+        EvidenceClass::InformationGap
     } else {
         EvidenceClass::Unknown
     }
@@ -134,14 +192,14 @@ pub fn classify_wait_reason(reason: &str) -> EvidenceClass {
 
 /// Fail-closed: WAIT / gap / authority-claim text / non-zero or missing exit
 /// cannot become PASS. Command success is not achieved state.
+/// WAIT / UNKNOWN / bounce / VERIFIED words in the log are not PASS.
 pub fn classify_verify(
     status: EvidenceStatus,
     exit_code: Option<i32>,
     last_lines: &str,
 ) -> EvidenceClass {
-    let from_lines = classify_wait_reason(last_lines);
-    if from_lines != EvidenceClass::Unknown {
-        return from_lines;
+    if line_blocks_pass(last_lines) {
+        return classify_wait_reason(last_lines);
     }
     if matches!(exit_code, Some(code) if code != 0) {
         return EvidenceClass::Inconclusive;
@@ -246,7 +304,47 @@ mod tests {
     #[test]
     fn map_is_not_a_kernel_copy() {
         assert!(!COPIES_KERNEL);
+        assert!(!BOUNCE_IS_KERNEL_TYPE);
         assert_eq!(AASM_PIN, "0.56.1");
+        match EvidenceClass::Unknown {
+            EvidenceClass::Inconclusive
+            | EvidenceClass::InformationGap
+            | EvidenceClass::Unknown
+            | EvidenceClass::Pass => {}
+        }
+    }
+
+    #[test]
+    fn look_only_dictionary_maps_shop_words() {
+        let bounce = map_shop_word("bounce").expect("bounce is a shop word");
+        assert!(bounce.contains("backjump"), "{bounce}");
+        assert!(!bounce
+            .to_ascii_lowercase()
+            .contains("kernel type named bounce"));
+        assert_eq!(map_shop_word("WAIT"), Some(WAIT_CLASS_NOTE));
+        assert_eq!(map_shop_word("held"), Some(LEASE_NOTE));
+        assert_eq!(map_shop_word("parent_open"), Some(LEASE_NOTE));
+        assert_eq!(map_shop_word("reduce"), Some(REDUCE_NOT_RECOMBINE));
+        assert!(map_shop_word("reduce")
+            .unwrap()
+            .contains("not AASM recombine"));
+        assert_eq!(map_shop_word("verify pass"), Some(VERIFY_PASS_NOTE));
+        assert_eq!(map_shop_word("merge ack"), Some(MERGE_ACK_NOTE));
+        assert_eq!(map_shop_word("invented-lane"), None);
+        assert_eq!(
+            WAIT_CLASSES,
+            [
+                EvidenceClass::Inconclusive,
+                EvidenceClass::InformationGap,
+                EvidenceClass::Unknown,
+            ]
+        );
+        for class in WAIT_CLASSES {
+            assert!(class.is_shop_wait());
+            assert!(class.is_wait_class());
+            assert_ne!(class, EvidenceClass::Pass);
+            assert_eq!(class.to_shop_status(), EvidenceStatus::Wait);
+        }
     }
 
     #[test]
@@ -264,11 +362,7 @@ mod tests {
             EvidenceClass::Pass
         );
         assert_eq!(
-            classify_verify(
-                EvidenceStatus::Pass,
-                Some(0),
-                "no verify command recorded"
-            ),
+            classify_verify(EvidenceStatus::Pass, Some(0), "no verify command recorded"),
             EvidenceClass::InformationGap
         );
         assert_eq!(
@@ -314,6 +408,38 @@ mod tests {
         assert_eq!(
             classify_verify(EvidenceStatus::Pass, Some(1), "ok"),
             EvidenceClass::Inconclusive
+        );
+        assert_eq!(
+            classify_verify(EvidenceStatus::Pass, Some(0), "WAIT"),
+            EvidenceClass::InformationGap
+        );
+        assert_eq!(
+            classify_verify(EvidenceStatus::Pass, Some(0), "UNKNOWN"),
+            EvidenceClass::Unknown
+        );
+        assert_eq!(
+            classify_verify(EvidenceStatus::Pass, Some(0), "INCONCLUSIVE"),
+            EvidenceClass::Inconclusive
+        );
+        assert_eq!(
+            classify_verify(EvidenceStatus::Pass, Some(0), "incomplete evidence"),
+            EvidenceClass::InformationGap
+        );
+        assert_eq!(
+            classify_verify(EvidenceStatus::Pass, Some(0), "VERIFIED"),
+            EvidenceClass::InformationGap
+        );
+        assert_eq!(
+            classify_verify(EvidenceStatus::Pass, Some(0), "bounce / backjump"),
+            EvidenceClass::InformationGap
+        );
+        assert_ne!(
+            classify_verify(EvidenceStatus::Pass, Some(0), "WAIT"),
+            EvidenceClass::Pass
+        );
+        assert_ne!(
+            classify_verify(EvidenceStatus::Pass, None, "missing exit"),
+            EvidenceClass::Pass
         );
         assert_eq!(
             EvidenceClass::InformationGap.to_shop_status(),
