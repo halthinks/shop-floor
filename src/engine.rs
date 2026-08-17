@@ -29,7 +29,7 @@ use crate::memory::{MemoryTier, ShopMemory};
 use crate::paths::{parse_paths, paths_overlap};
 use crate::procwait::{self, LiveProcess, ProcWaitLedger, ProcessBind, StopRecord, WaitEvidence};
 use crate::project::{
-    default_recents_path, format_recents, is_forbidden_project, load_recents, origin_github_slug,
+    default_recents_path, format_recents, load_recents, origin_github_slug,
     project_name, project_root_from_store, recent_path_for_repo, record_recent, refuse_platform,
     slugs_from_github_search, store_dir_for, touch_recent_github,
 };
@@ -1857,9 +1857,10 @@ fn validate_id(id: &str) -> Result<()> {
 
 /// Platform, absolute, UNC, drive-letter, or control-byte paths are not a lease.
 /// Empty parent scope still refuses amplification; overlap is a separate check.
+/// Relative claims that merely mention the Platform words are not the Platform directory.
 fn refuse_claim_paths(paths: &[String], parent_id: &str) -> Result<()> {
     for p in paths {
-        if is_forbidden_project(Path::new(p)) {
+        if names_platform_directory(Path::new(p)) {
             return Err(ShopError::ForbiddenWrite(PathBuf::from(p)));
         }
         if !crate::aasm_map::path_within_parent_scope(p, p) {
@@ -1953,10 +1954,13 @@ fn check_overlap(state: &ShopState, paths: &[String]) -> Result<()> {
 
 fn load_handoff(spec: &str) -> Result<Handoff> {
     let path = Path::new(spec);
-    if is_forbidden_project(path) {
-        return Err(ShopError::ForbiddenWrite(path.to_path_buf()));
+    let as_file = path.is_file();
+    if as_file || handoff_spec_is_path(spec) {
+        if names_platform_directory(path) {
+            return Err(ShopError::ForbiddenWrite(path.to_path_buf()));
+        }
     }
-    let (bytes, source) = if path.is_file() {
+    let (bytes, source) = if as_file {
         (fs::read(path)?, spec.to_string())
     } else {
         (spec.as_bytes().to_vec(), "inline".to_string())
@@ -2082,13 +2086,56 @@ fn spawn_verify_command(cmd: &str) -> std::io::Result<std::process::Output> {
 }
 
 fn command_mentions_platform(cmd: &str) -> bool {
-    if is_forbidden_project(Path::new(cmd)) {
+    names_platform_directory(Path::new(cmd)) || command_invokes_platform_path(cmd)
+}
+
+/// Inline JSON / notes are not a filesystem path. Only refuse Platform when
+/// the spec is being used as a path (existing file, or path-shaped and not JSON).
+fn handoff_spec_is_path(spec: &str) -> bool {
+    let t = spec.trim();
+    if t.is_empty() {
+        return false;
+    }
+    if t.starts_with('{') || t.starts_with('[') {
+        return false;
+    }
+    t.contains('/') || t.contains('\\') || Path::new(spec).is_file()
+}
+
+/// True only when `path` names `C:\TextPCB Platform` or a descendant.
+/// A relative claim such as `docs/TextPCB Platform/notes.md` is not that directory.
+fn names_platform_directory(path: &Path) -> bool {
+    if names_platform_directory_str(&path.to_string_lossy()) {
         return true;
     }
-    let lower = cmd.to_ascii_lowercase();
-    lower.contains("textpcb platform")
-        || lower.contains("c:\\textpcb")
-        || lower.contains("c:/textpcb")
+    path.canonicalize()
+        .ok()
+        .is_some_and(|canon| names_platform_directory_str(&canon.to_string_lossy()))
+}
+
+fn names_platform_directory_str(raw: &str) -> bool {
+    const ROOT: &str = r"c:\textpcb platform";
+    let mut norm = raw.replace('/', "\\").to_ascii_lowercase();
+    if let Some(rest) = norm.strip_prefix(r"\\?\") {
+        norm = rest.to_string();
+    }
+    let trimmed = norm.trim_end_matches('\\');
+    trimmed == ROOT || trimmed.starts_with(&format!("{ROOT}\\"))
+}
+
+/// Verify commands that invoke the absolute Platform directory are refused.
+/// A mention inside a quoted note is not a path invocation.
+fn command_invokes_platform_path(cmd: &str) -> bool {
+    let lower = cmd.to_ascii_lowercase().replace('/', "\\");
+    for token in lower.split_whitespace() {
+        let token = token.trim_matches(|c: char| {
+            matches!(c, '"' | '\'' | '`' | ',' | ';' | '(' | ')' | '[' | ']')
+        });
+        if names_platform_directory_str(token) {
+            return true;
+        }
+    }
+    false
 }
 
 fn last_lines(s: &str, n: usize) -> String {
@@ -2165,4 +2212,45 @@ fn format_status(state: &ShopState, parent_id: Option<&str>) -> Result<String> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod platform_path_tests {
+    use super::*;
+
+    #[test]
+    fn relative_claim_with_platform_words_is_not_the_platform_directory() {
+        assert!(!names_platform_directory(Path::new(
+            "docs/TextPCB Platform/notes.md"
+        )));
+        assert!(!names_platform_directory(Path::new(
+            r"docs\TextPCB Platform\notes.md"
+        )));
+        assert!(names_platform_directory(Path::new(r"C:\TextPCB Platform")));
+        assert!(names_platform_directory(Path::new(
+            r"C:\TextPCB Platform\src\foo.rs"
+        )));
+        assert!(names_platform_directory(Path::new(
+            r"C:/TextPCB Platform/src/foo.rs"
+        )));
+        assert!(refuse_claim_paths(
+            &["docs/TextPCB Platform/notes.md".into()],
+            "P"
+        )
+        .is_ok());
+        assert!(refuse_claim_paths(&[r"C:\TextPCB Platform".into()], "P").is_err());
+    }
+
+    #[test]
+    fn inline_handoff_may_mention_platform_without_being_a_path() {
+        assert!(!handoff_spec_is_path(
+            r#"{"status":"PASS","note":"checked C:\\TextPCB Platform"}"#
+        ));
+        assert!(handoff_spec_is_path(r"C:\TextPCB Platform\handoff.json"));
+        let handoff =
+            load_handoff(r#"{"status":"PASS","note":"checked C:\\TextPCB Platform"}"#).unwrap();
+        assert_eq!(handoff.status, "PASS");
+        assert_eq!(handoff.source, "inline");
+        assert!(load_handoff(r"C:\TextPCB Platform\handoff.json").is_err());
+    }
 }
