@@ -121,6 +121,8 @@ impl FloorSet {
         Ok(self.handle_at(idx))
     }
 
+    /// Returns the current live `Shop`. `Shop` is not `Debug`; do not
+    /// `:?` this `Result` (Linux tests fail to compile if you do).
     pub fn current(&self) -> Result<&Shop> {
         let idx = self.current.ok_or_else(|| {
             ShopError::IncompleteEvidence("WAIT: no open floor; open a project first".into())

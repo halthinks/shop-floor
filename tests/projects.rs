@@ -560,11 +560,13 @@ fn empty_and_unknown_are_wait_not_pass() {
     }
     match floors.current() {
         Err(ShopError::IncompleteEvidence(msg)) => assert!(msg.contains("WAIT")),
-        other => panic!("no current must WAIT, got {other:?}"),
+        Err(e) => panic!("no current must WAIT, got {e}"),
+        Ok(_) => panic!("no current must WAIT, got Ok(Shop)"),
     }
     match floors.get("missing") {
         Err(ShopError::Wait(_)) => {}
-        other => panic!("missing get must WAIT, got {other:?}"),
+        Err(e) => panic!("missing get must WAIT, got {e}"),
+        Ok(_) => panic!("missing get must WAIT, got Ok(Shop)"),
     }
     match floors.close("") {
         Err(ShopError::IncompleteEvidence(_)) => {}
