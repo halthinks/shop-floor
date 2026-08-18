@@ -10,6 +10,7 @@ Named leftover paths from `docs/SUITE_ROADMAP.md` suite modules, in order, one o
 1. `src/proving.rs` — used on main
 1. `src/awareness.rs` — used on main
 1. `src/mailbox.rs` — used on main
+1. `src/steer.rs` — used on main
 
 The shop pulse is the lander. Orchestrator is not in the loop.
 
