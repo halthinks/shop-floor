@@ -183,18 +183,7 @@ fn route(app: &Mutex<Shop>, method: &str, path: &str, body: &str) -> (String, St
         }
         ("GET", "/api/steer") => {
             let shop = app.lock().unwrap_or_else(|e| e.into_inner());
-            let _ = shop.ingest_replies();
-            let mail = shop.observe_mailbox();
-            let status = if mail.present && mail.wait.is_none() {
-                "Live"
-            } else {
-                "Waiting"
-            };
-            json_ok(json!({
-                "lines": shop.steer_transcript(),
-                "peer": crate::mailbox::STEER_TO,
-                "status": status,
-            }))
+            json_ok(steer_payload(&shop))
         }
         ("GET", "/api/memory") => {
             let shop = app.lock().unwrap_or_else(|e| e.into_inner());
@@ -501,11 +490,10 @@ fn post_grokbot(shop: &Shop, body: &str) -> Result<Value> {
     Ok(grokbot_json(&state))
 }
 
-fn steer_target_id(shop: &Shop) -> String {
-    match shop.workers() {
-        Ok(roster) if roster.workers.iter().any(|w| w.peer == "kimi-code") => "kimi-code".into(),
-        _ => "captain".into(),
-    }
+/// Work-graph steer target is SuperGrok (`STEER_TO`). kimi-code, if enrolled,
+/// stays a worker node — never captain, never a fake Live/PASS.
+fn steer_target_id(_shop: &Shop) -> String {
+    crate::mailbox::STEER_TO.into()
 }
 
 fn graph_payload(shop: &Shop) -> Value {
@@ -517,13 +505,7 @@ fn graph_payload(shop: &Shop) -> Value {
         .iter()
         .find(|w| w.peer == target)
         .map(|w| w.name.clone())
-        .unwrap_or_else(|| {
-            if target == "kimi-code" {
-                "kimi-code".into()
-            } else {
-                "Captain".into()
-            }
-        });
+        .unwrap_or_else(|| "SuperGrokHeavy".into());
     let mut nodes = vec![
         json!({
             "id": GROKBOT_PEER,
@@ -551,17 +533,32 @@ fn graph_payload(shop: &Shop) -> Value {
             "steerable": false,
         }));
     }
-    if let Ok(jobs) = local_live_jobs(shop) {
-        for job in jobs {
-            let id = format!("job:{}:{}", job.parent_id, job.child_id);
-            nodes.push(json!({
-                "id": id,
-                "label": format!("{}/{}", job.parent_id, job.child_id),
-                "kind": "job",
-                "peer": job.peer,
-                "action": job.action,
-                "steerable": false,
-            }));
+    let mut job_wait: Option<String> = None;
+    match local_live_jobs(shop) {
+        Ok(jobs) => {
+            for job in jobs {
+                let id = format!("job:{}:{}", job.parent_id, job.child_id);
+                // Awareness already refuses working-without-pid. Repeat that
+                // here so the graph never invents a working node.
+                let action = if job.action == "working" && job.pid.is_none() {
+                    "wait"
+                } else {
+                    job.action.as_str()
+                };
+                nodes.push(json!({
+                    "id": id,
+                    "label": format!("{}/{}", job.parent_id, job.child_id),
+                    "kind": "job",
+                    "peer": job.peer,
+                    "action": action,
+                    "pid": job.pid,
+                    "pid_liveness": job.pid_liveness,
+                    "steerable": false,
+                }));
+            }
+        }
+        Err(e) => {
+            job_wait = Some(format!("WAIT: {e}"));
         }
     }
     let mut graph = json!({
@@ -572,7 +569,7 @@ fn graph_payload(shop: &Shop) -> Value {
             "kind": "steer",
         }],
     });
-    if let Some(w) = gb.wait {
+    if let Some(w) = gb.wait.or(job_wait) {
         if let Some(obj) = graph.as_object_mut() {
             obj.insert("wait".into(), json!(w));
         }
@@ -582,9 +579,33 @@ fn graph_payload(shop: &Shop) -> Value {
 
 fn workers_json(shop: &Shop) -> Value {
     match shop.workers() {
-        Ok(r) => serde_json::to_value(r).unwrap_or(json!({"workers": []})),
-        Err(e) => json!({"error": e.to_string()}),
+        Ok(r) => {
+            serde_json::to_value(r).unwrap_or(json!({"WAIT": "workers unreadable", "workers": []}))
+        }
+        Err(e) => json!({"WAIT": e.to_string(), "workers": []}),
     }
+}
+
+fn steer_payload(shop: &Shop) -> Value {
+    let _ = shop.ingest_replies();
+    let mail = shop.observe_mailbox();
+    let wait = crate::steer::steer_wait(shop.mailbox_root()).or_else(|| mail.wait.clone());
+    let hold_in_flight = mail.hold_in_flight();
+    // Present mailbox is not PASS. Missing inbox or unread HOLD is Waiting.
+    let status = if wait.is_some() || hold_in_flight || !mail.present {
+        "Waiting"
+    } else {
+        "Live"
+    };
+    json!({
+        "lines": shop.steer_transcript(),
+        "peer": crate::mailbox::STEER_TO,
+        "status": status,
+        "wait": wait,
+        "hold_in_flight": hold_in_flight,
+        "pass": false,
+        "note": "steer is Evidence; missing mailbox is WAIT; never PASS",
+    })
 }
 
 fn project_json(shop: &Shop) -> Value {
@@ -1245,15 +1266,19 @@ mod tests {
         let edges = v["edges"].as_array().expect("edges");
         assert!(
             edges.iter().any(|e| {
-                e["from"] == GROKBOT_PEER && e["to"] == "captain" && e["kind"] == "steer"
+                e["from"] == GROKBOT_PEER
+                    && e["to"] == crate::mailbox::STEER_TO
+                    && e["kind"] == "steer"
             }),
-            "missing grok-bot -> captain steer edge: {edges:?}"
+            "missing grok-bot -> SuperGrok steer edge: {edges:?}"
         );
-        assert!(nodes.iter().any(|n| n["id"] == "captain"));
+        assert!(nodes.iter().any(|n| n["id"] == crate::mailbox::STEER_TO));
+        assert!(!nodes.iter().any(|n| n["id"] == "kimi-code"));
+        assert!(!nodes.iter().any(|n| n["id"] == "captain"));
     }
 
     #[test]
-    fn graph_steers_kimi_code_when_that_id_exists() {
+    fn graph_steers_supergrok_even_when_kimi_code_exists() {
         let dir = tmp_store();
         let mut shop = Shop::init(&dir).unwrap();
         shop.add_worker("kimi-code", "Kimi", "cursor", "", true)
@@ -1263,20 +1288,39 @@ mod tests {
         let edges = v["edges"].as_array().expect("edges");
         assert!(
             edges.iter().any(|e| {
-                e["from"] == GROKBOT_PEER && e["to"] == "kimi-code" && e["kind"] == "steer"
+                e["from"] == GROKBOT_PEER
+                    && e["to"] == crate::mailbox::STEER_TO
+                    && e["kind"] == "steer"
             }),
-            "missing grok-bot -> kimi-code steer edge: {edges:?}"
+            "missing grok-bot -> SuperGrok steer edge: {edges:?}"
         );
-        assert!(v["nodes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|n| n["id"] == "kimi-code"));
-        assert!(!v["nodes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|n| n["id"] == "captain"));
+        assert!(!edges.iter().any(|e| {
+            e["from"] == GROKBOT_PEER && e["to"] == "kimi-code" && e["kind"] == "steer"
+        }));
+        let nodes = v["nodes"].as_array().unwrap();
+        assert!(nodes.iter().any(|n| n["id"] == crate::mailbox::STEER_TO));
+        assert!(nodes.iter().any(|n| n["id"] == "kimi-code"));
+        assert!(!nodes.iter().any(|n| n["id"] == "captain"));
+    }
+
+    #[test]
+    fn api_steer_without_inbox_is_wait_never_live_or_pass() {
+        let dir = tmp_store();
+        let shop = Shop::init(&dir).unwrap();
+        let host = spawn_shop(shop);
+        let resp = http(&host, "GET", "/api/steer", "");
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+        let v = json_body(&resp);
+        assert_eq!(v["peer"], crate::mailbox::STEER_TO);
+        assert_eq!(v["status"], "Waiting");
+        assert_ne!(v["status"], "Live");
+        assert_ne!(v["status"], "PASS");
+        assert_eq!(v["pass"], false);
+        let wait = v["wait"].as_str().unwrap_or("");
+        assert!(wait.contains("WAIT"), "{v}");
+        assert!(!wait.contains("PASS"));
+        assert_ne!(v["wait"], "PASS");
+        assert!(v.get("VERIFIED").is_none());
     }
 
     #[test]
