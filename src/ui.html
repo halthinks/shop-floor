@@ -248,6 +248,8 @@ function aiWords(backend){
 }
 function waitWords(raw){
   const s = String(raw||'');
+  if (/hold/i.test(s) && /assign|unread|flight/i.test(s)) return 'HOLD — unread assign in flight';
+  if (/mailbox missing|recorded locally/i.test(s)) return 'Waiting — mailbox not ready';
   if (/mailbox/i.test(s)) return 'Mailbox not found';
   if (/token|sign-in|auth|gh /i.test(s)) return 'Waiting for GitHub sign-in';
   if (/store/i.test(s)) return 'Waiting for the shop store';
@@ -257,6 +259,11 @@ function waitWords(raw){
   if (/no job open/i.test(s)) return 'Waiting — no job open';
   const t = s.replace(/^WAIT:\s*/i,'').trim();
   return t ? ('Waiting — ' + t) : 'Waiting';
+}
+function mailboxHold(mb){
+  if (!mb) return false;
+  if (mb.hold_in_flight) return true;
+  return (mb.peers || []).some(p => p.latest_assign);
 }
 function shownAction(action, pid){
   const a = pillClass(action);
@@ -357,9 +364,13 @@ function renderGraph(g){
     const id = String(n.id || '');
     const selected = id === selectedGraphId ? ' selected' : '';
     const steerable = n.steerable ? ' steerable' : '';
+    const kind = n.kind ? ' ' + String(n.kind) : '';
+    const action = n.kind === 'job' ? shownAction(n.action, n.pid) : '';
+    const waitNode = action === 'wait' ? ' wait' : '';
     const role = n.role ? `<span class="quiet">${esc(n.role)}</span>` : '';
+    const pill = action ? `<span class="action-pill ${action}">${pillWord(action)}</span>` : '';
     const nid = id === 'grok-bot' ? ' id="grok-bot"' : '';
-    return `<button type="button" class="graph-node${steerable}${selected}" data-id="${esc(id)}"${nid} aria-pressed="${id===selectedGraphId?'true':'false'}">${esc(n.label || id)} ${role}</button>`;
+    return `<button type="button" class="graph-node${steerable}${selected}${kind}${waitNode}" data-id="${esc(id)}"${nid} aria-pressed="${id===selectedGraphId?'true':'false'}">${esc(n.label || id)} ${role}${pill}</button>`;
   }).join('');
   const wait = g.wait ? '<div class="quiet">'+esc(waitWords(g.wait))+'</div>' : '';
   box.innerHTML = wait + '<div class="graph-edges">'+edgeHtml+'</div><div class="graph-node-row">'+nodeHtml+'</div>';
@@ -376,11 +387,12 @@ function renderGrokbot(gb){
   const steers = Array.isArray(gb && gb.steers) ? gb.steers : [];
   const last = steers.length ? steers[steers.length-1] : null;
   const el = document.getElementById('grokbot-steers');
+  const wait = gb && gb.wait ? '<div class="wait">'+esc(waitWords(gb.wait))+'</div>' : '';
   if (!last) {
-    el.innerHTML = '<div class="quiet">No steer yet</div>';
+    el.innerHTML = wait + '<div class="quiet">No steer yet</div>';
     return;
   }
-  el.innerHTML = '<div class="quiet">Last steer · '+esc(last.role || role)+'</div><div class="grokbot-last">'+esc(last.text || '')+'</div>';
+  el.innerHTML = wait + '<div class="quiet">Last steer · '+esc(last.role || role)+'</div><div class="grokbot-last">'+esc(last.text || '')+'</div>';
 }
 
 async function refreshGraph(){
@@ -402,9 +414,13 @@ async function refresh(){
 
   const storeOk = st.store_ok !== false;
   const mailOk = !!(st.mailbox && st.mailbox.present && !st.mailbox.wait);
+  const hold = mailboxHold(st.mailbox);
   const pill = document.getElementById('live-pill');
   const gp = document.getElementById('global-pills');
-  if (storeOk && mailOk) {
+  if (hold) {
+    pill.textContent = 'HOLD';
+    pill.className = 'action-pill hold';
+  } else if (storeOk && mailOk) {
     pill.textContent = 'LIVE';
     pill.className = 'action-pill live';
   } else {
@@ -593,8 +609,13 @@ async function refreshSteer(){
   }).join('');
   el.scrollTop = el.scrollHeight;
   const hasReply = lines.some(l => l.role === 'orchestrator' || l.role === 'boss');
-  const status = hasReply && s.status === 'Live' ? 'Live' : 'Waiting';
-  document.getElementById('boss-status').textContent = 'SuperGrokHeavy · ' + status;
+  const blocked = !!(s.wait || s.hold_in_flight || s.status !== 'Live' || s.pass === true);
+  const status = (!blocked && hasReply) ? 'Live' : 'Waiting';
+  const boss = document.getElementById('boss-status');
+  boss.textContent = s.wait
+    ? ('SuperGrokHeavy · ' + waitWords(s.wait))
+    : ('SuperGrokHeavy · ' + status);
+  boss.classList.toggle('wait', status !== 'Live');
 }
 
 async function refreshMemory(){
