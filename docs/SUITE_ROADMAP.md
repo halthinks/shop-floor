@@ -87,6 +87,7 @@ evidence is WAIT. Do not invent a fifth product.
 | 3 | shop-proving | `src/proving.rs` | Thin proving helpers only. Do not rewrite `tests/aasm_proving.rs` unless that file is also owned later. |
 | 4 | shop-awareness | `src/awareness.rs` | Live awareness of workers/jobs from store + mailbox + GitHub records. No fake numbers. Missing count is `None` / WAIT. Do not touch `src/workers.rs` unless assigned. |
 | 5 | shop-mailbox | `src/mailbox.rs` | Mailbox adapter only. One assign in flight. Outbox is durable if the inbox is down. Do not invent a fifth product. |
+| 6 | shop-steer | `src/steer.rs` | Control-plane steer only. Missing evidence is WAIT. Steer cannot CLOSE a parent or mint VERIFIED. Do not invent a fifth product. |
 
 Hold, not a suite row:
 
