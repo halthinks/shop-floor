@@ -501,11 +501,10 @@ fn post_grokbot(shop: &Shop, body: &str) -> Result<Value> {
     Ok(grokbot_json(&state))
 }
 
-fn steer_target_id(shop: &Shop) -> String {
-    match shop.workers() {
-        Ok(roster) if roster.workers.iter().any(|w| w.peer == "kimi-code") => "kimi-code".into(),
-        _ => "captain".into(),
-    }
+/// Work-graph steer target: SuperGrok (`STEER_TO`). kimi-code is demoted —
+/// if that peer is still on the roster it is a worker, not captain.
+fn steer_target_id(_shop: &Shop) -> String {
+    crate::mailbox::STEER_TO.into()
 }
 
 fn graph_payload(shop: &Shop) -> Value {
@@ -517,13 +516,7 @@ fn graph_payload(shop: &Shop) -> Value {
         .iter()
         .find(|w| w.peer == target)
         .map(|w| w.name.clone())
-        .unwrap_or_else(|| {
-            if target == "kimi-code" {
-                "kimi-code".into()
-            } else {
-                "Captain".into()
-            }
-        });
+        .unwrap_or_else(|| "SuperGrokHeavy".into());
     let mut nodes = vec![
         json!({
             "id": GROKBOT_PEER,
@@ -1245,15 +1238,18 @@ mod tests {
         let edges = v["edges"].as_array().expect("edges");
         assert!(
             edges.iter().any(|e| {
-                e["from"] == GROKBOT_PEER && e["to"] == "captain" && e["kind"] == "steer"
+                e["from"] == GROKBOT_PEER
+                    && e["to"] == crate::mailbox::STEER_TO
+                    && e["kind"] == "steer"
             }),
-            "missing grok-bot -> captain steer edge: {edges:?}"
+            "missing grok-bot -> SuperGrok steer edge: {edges:?}"
         );
-        assert!(nodes.iter().any(|n| n["id"] == "captain"));
+        assert!(nodes.iter().any(|n| n["id"] == crate::mailbox::STEER_TO));
+        assert!(!nodes.iter().any(|n| n["id"] == "kimi-code"));
     }
 
     #[test]
-    fn graph_steers_kimi_code_when_that_id_exists() {
+    fn graph_steers_supergrok_even_when_kimi_code_exists() {
         let dir = tmp_store();
         let mut shop = Shop::init(&dir).unwrap();
         shop.add_worker("kimi-code", "Kimi", "cursor", "", true)
@@ -1263,20 +1259,19 @@ mod tests {
         let edges = v["edges"].as_array().expect("edges");
         assert!(
             edges.iter().any(|e| {
-                e["from"] == GROKBOT_PEER && e["to"] == "kimi-code" && e["kind"] == "steer"
+                e["from"] == GROKBOT_PEER
+                    && e["to"] == crate::mailbox::STEER_TO
+                    && e["kind"] == "steer"
             }),
-            "missing grok-bot -> kimi-code steer edge: {edges:?}"
+            "missing grok-bot -> SuperGrok steer edge: {edges:?}"
         );
-        assert!(v["nodes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|n| n["id"] == "kimi-code"));
-        assert!(!v["nodes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|n| n["id"] == "captain"));
+        assert!(!edges.iter().any(|e| {
+            e["from"] == GROKBOT_PEER && e["to"] == "kimi-code" && e["kind"] == "steer"
+        }));
+        let nodes = v["nodes"].as_array().unwrap();
+        assert!(nodes.iter().any(|n| n["id"] == crate::mailbox::STEER_TO));
+        assert!(nodes.iter().any(|n| n["id"] == "kimi-code"));
+        assert!(!nodes.iter().any(|n| n["id"] == "captain"));
     }
 
     #[test]
